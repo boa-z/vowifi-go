@@ -42,8 +42,10 @@ protocol layers needed by VoHive:
 - IKE_SA_INIT initiator flow with UDP/NAT-T transport support, X25519 key
   exchange, NAT-D/MOBIKE notifications, responder parsing, SKEYSEED, and IKE SA
   key material derivation
+- IKEv2 key material split into SK_d/SK_ai/SK_ar/SK_ei/SK_er/SK_pi/SK_pr plus
+  AES-CBC/HMAC protected SK payload construction and verification
 
-The encrypted IKE_AUTH/EAP-AKA exchange, ESP packet transport, and RTP media
+The IKE_AUTH/EAP-AKA state machine, ESP packet transport, and RTP media
 transport are still implemented incrementally behind these APIs.
 
 ## Development

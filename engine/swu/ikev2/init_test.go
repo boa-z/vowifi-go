@@ -83,15 +83,14 @@ func TestRunIKESAInitDerivesKeys(t *testing.T) {
 		localPort:    500,
 	}
 	res, err := RunIKE_SA_INIT(context.Background(), InitConfig{
-		Transport:         fake,
-		InitiatorSPI:      0x0102030405060708,
-		NonceI:            nonceI,
-		X25519PrivateKey:  initiatorKey,
-		LocalIP:           fake.localIP,
-		LocalPort:         fake.localPort,
-		RemoteIP:          fake.remoteIP,
-		RemotePort:        fake.remotePort,
-		KeyMaterialLength: 64,
+		Transport:        fake,
+		InitiatorSPI:     0x0102030405060708,
+		NonceI:           nonceI,
+		X25519PrivateKey: initiatorKey,
+		LocalIP:          fake.localIP,
+		LocalPort:        fake.localPort,
+		RemoteIP:         fake.remoteIP,
+		RemotePort:       fake.remotePort,
 	})
 	if err != nil {
 		t.Fatalf("RunIKE_SA_INIT() error = %v", err)
@@ -102,8 +101,11 @@ func TestRunIKESAInitDerivesKeys(t *testing.T) {
 	if !res.MOBIKESupported || res.NATDetected || res.PRF != crypto.SHA256 {
 		t.Fatalf("mobike=%t nat=%t prf=%v", res.MOBIKESupported, res.NATDetected, res.PRF)
 	}
-	if len(res.SKEYSEED) != crypto.SHA256.Size() || len(res.KeyMaterial) != 64 {
+	if len(res.SKEYSEED) != crypto.SHA256.Size() || len(res.KeyMaterial) != res.Keys.Profile.RequiredLength() {
 		t.Fatalf("key lengths skeyseed=%d material=%d", len(res.SKEYSEED), len(res.KeyMaterial))
+	}
+	if len(res.Keys.SKAi) != crypto.SHA256.Size() || len(res.Keys.SKEi) != 16 || len(res.Keys.SKPi) != crypto.SHA256.Size() {
+		t.Fatalf("split keys=%+v", res.Keys)
 	}
 	privR, err := ecdh.X25519().NewPrivateKey(responderKey)
 	if err != nil {

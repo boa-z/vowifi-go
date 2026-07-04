@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultNonceLength          = 32
-	DefaultIKEKeyMaterialLength = 160
+	DefaultIKEKeyMaterialLength = 192
 )
 
 var (
@@ -113,6 +113,7 @@ type InitResult struct {
 	PRF             crypto.Hash
 	SKEYSEED        []byte
 	KeyMaterial     []byte
+	Keys            IKEKeys
 	MOBIKESupported bool
 	NATDetected     bool
 }
@@ -192,18 +193,29 @@ func RunIKE_SA_INIT(ctx context.Context, cfg InitConfig) (InitResult, error) {
 	if err != nil {
 		return InitResult{}, fmt.Errorf("%w: ECDH: %w", ErrInvalidInitResponse, err)
 	}
-	prfHash := selectedPRFHash(parsed.sa)
+	profile, err := KeyMaterialProfileFromSA(parsed.sa)
+	if err != nil {
+		return InitResult{}, err
+	}
+	prfHash := profile.PRF
 	skeyseed, err := SKEYSEED(prfHash, nonceI, parsed.nonceR, shared)
 	if err != nil {
 		return InitResult{}, err
 	}
 	keyMaterialLength := cfg.KeyMaterialLength
 	if keyMaterialLength <= 0 {
-		keyMaterialLength = DefaultIKEKeyMaterialLength
+		keyMaterialLength = profile.RequiredLength()
 	}
 	keyMaterial, err := DeriveIKESAKeyMaterial(prfHash, skeyseed, nonceI, parsed.nonceR, spiI, resp.Header.ResponderSPI, keyMaterialLength)
 	if err != nil {
 		return InitResult{}, err
+	}
+	var keys IKEKeys
+	if len(keyMaterial) >= profile.RequiredLength() {
+		keys, err = SplitIKEKeys(profile, keyMaterial)
+		if err != nil {
+			return InitResult{}, err
+		}
 	}
 	return InitResult{
 		RequestBytes:    append([]byte(nil), reqBytes...),
@@ -221,6 +233,7 @@ func RunIKE_SA_INIT(ctx context.Context, cfg InitConfig) (InitResult, error) {
 		PRF:             prfHash,
 		SKEYSEED:        skeyseed,
 		KeyMaterial:     keyMaterial,
+		Keys:            keys,
 		MOBIKESupported: parsed.mobikeSupported,
 		NATDetected:     detectNAT(parsed.notifies, spiI, resp.Header.ResponderSPI, cfg),
 	}, nil
@@ -331,15 +344,8 @@ func selectedPRFHash(sa SecurityAssociation) crypto.Hash {
 	for _, p := range sa.Proposals {
 		for _, tr := range p.Transforms {
 			if tr.Type == TransformPRF {
-				switch tr.ID {
-				case PRF_HMAC_SHA1:
-					return crypto.SHA1
-				case PRF_HMAC_SHA2_384:
-					return crypto.SHA384
-				case PRF_HMAC_SHA2_512:
-					return crypto.SHA512
-				default:
-					return crypto.SHA256
+				if h, err := PRFHashForTransform(tr.ID); err == nil {
+					return h
 				}
 			}
 		}

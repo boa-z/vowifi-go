@@ -106,9 +106,10 @@ func ParseHeader(data []byte) (Header, error) {
 }
 
 type Payload struct {
-	Type     uint8
-	Critical bool
-	Body     []byte
+	Type        uint8
+	NextPayload uint8
+	Critical    bool
+	Body        []byte
 }
 
 func MarshalPayloads(payloads []Payload) (first uint8, data []byte, err error) {
@@ -118,7 +119,12 @@ func MarshalPayloads(payloads []Payload) (first uint8, data []byte, err error) {
 	first = payloads[0].Type
 	for i, p := range payloads {
 		next := PayloadNoNext
-		if i+1 < len(payloads) {
+		if p.Type == PayloadSK && p.NextPayload != PayloadNoNext {
+			next = p.NextPayload
+			if i+1 < len(payloads) {
+				return 0, nil, fmt.Errorf("%w: SK payload must be last", ErrInvalidLength)
+			}
+		} else if i+1 < len(payloads) {
 			next = payloads[i+1].Type
 		}
 		if len(p.Body)+4 > 0xffff {
@@ -152,10 +158,14 @@ func ParsePayloads(first uint8, data []byte) ([]Payload, error) {
 		}
 		current := next
 		next = rest[0]
+		if current == PayloadSK {
+			next = PayloadNoNext
+		}
 		out = append(out, Payload{
-			Type:     current,
-			Critical: rest[1]&0x80 != 0,
-			Body:     append([]byte(nil), rest[4:length]...),
+			Type:        current,
+			NextPayload: rest[0],
+			Critical:    rest[1]&0x80 != 0,
+			Body:        append([]byte(nil), rest[4:length]...),
 		})
 		rest = rest[length:]
 	}
