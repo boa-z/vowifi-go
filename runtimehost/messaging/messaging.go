@@ -15,6 +15,7 @@ import (
 
 var ErrDeliveryNotFound = errors.New("delivery not found")
 var ErrSMSTransportUnavailable = errors.New("sms transport unavailable")
+var ErrUSSDTransportUnavailable = errors.New("ussd transport unavailable")
 
 type suppressKey struct{}
 

@@ -63,6 +63,17 @@ func BuildByeRequest(cfg DialogRequestConfig) (SIPRequestMessage, error) {
 	return buildDialogRequest("BYE", cfg, nil)
 }
 
+func BuildByeRequestWithBody(cfg DialogRequestConfig, contentType string, body []byte) (SIPRequestMessage, error) {
+	msg, err := buildDialogRequest("BYE", cfg, body)
+	if err != nil {
+		return SIPRequestMessage{}, err
+	}
+	if len(body) > 0 {
+		msg.Headers["Content-Type"] = firstNonEmpty(contentType, "application/octet-stream")
+	}
+	return msg, nil
+}
+
 func BuildCancelRequest(cfg DialogRequestConfig) (SIPRequestMessage, error) {
 	return buildDialogRequest("CANCEL", cfg, nil)
 }
@@ -90,6 +101,20 @@ func BuildPrackRequest(cfg DialogRequestConfig, rack string) (SIPRequestMessage,
 	}
 	if strings.TrimSpace(rack) != "" {
 		msg.Headers["RAck"] = strings.TrimSpace(rack)
+	}
+	return msg, nil
+}
+
+func BuildInfoRequest(cfg DialogRequestConfig, contentType string, body []byte) (SIPRequestMessage, error) {
+	msg, err := buildDialogRequest("INFO", cfg, body)
+	if err != nil {
+		return SIPRequestMessage{}, err
+	}
+	if len(body) > 0 {
+		msg.Headers["Content-Type"] = firstNonEmpty(contentType, "application/octet-stream")
+	}
+	if contactURI := firstNonEmpty(cfg.ContactURI, cfg.Registration.ContactURI); contactURI != "" {
+		msg.Headers["Contact"] = "<" + contactURI + ">"
 	}
 	return msg, nil
 }
@@ -158,11 +183,11 @@ func buildDialogRequest(method string, cfg DialogRequestConfig, body []byte) (SI
 		"CSeq":                  strconv.Itoa(cseq) + " " + method,
 		"Max-Forwards":          "70",
 		"User-Agent":            firstNonEmpty(cfg.UserAgent, cfg.Profile.UserAgent, "vowifi-go"),
-		"Allow":                 "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, MESSAGE, OPTIONS",
+		"Allow":                 "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, INFO, MESSAGE, OPTIONS",
 		"P-Preferred-Identity":  "<" + localURI + ">",
 		"P-Access-Network-Info": "IEEE-802.11",
 	}
-	if contactURI != "" && (method == "INVITE" || method == "UPDATE") {
+	if contactURI != "" && (method == "INVITE" || method == "UPDATE" || method == "INFO") {
 		headers["Contact"] = "<" + contactURI + ">"
 	}
 	if route := routeHeader(firstNonEmptySlice(cfg.RouteSet, cfg.Registration.ServiceRoutes)); route != "" {

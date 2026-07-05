@@ -242,6 +242,13 @@ func TestBuildIMSDialogRequestsUseRegistrationRouteSet(t *testing.T) {
 	if bye.Method != "BYE" || bye.Headers["CSeq"] != "3 BYE" || bye.Headers["Contact"] != "" {
 		t.Fatalf("bye=%+v", bye)
 	}
+	byeBody, err := BuildByeRequestWithBody(cfg, "application/vnd.3gpp.ussd+xml", []byte("<ussd-data/>"))
+	if err != nil {
+		t.Fatalf("BuildByeRequestWithBody() error = %v", err)
+	}
+	if byeBody.Method != "BYE" || byeBody.Headers["Content-Type"] != "application/vnd.3gpp.ussd+xml" || string(byeBody.Body) != "<ussd-data/>" {
+		t.Fatalf("bye with body=%+v body=%q", byeBody, byeBody.Body)
+	}
 	update, err := BuildUpdateRequest(cfg, []byte("v=0\r\n"))
 	if err != nil {
 		t.Fatalf("BuildUpdateRequest() error = %v", err)
@@ -255,6 +262,13 @@ func TestBuildIMSDialogRequestsUseRegistrationRouteSet(t *testing.T) {
 	}
 	if prack.Method != "PRACK" || prack.Headers["RAck"] != "1 1 INVITE" || prack.Headers["CSeq"] != "3 PRACK" {
 		t.Fatalf("prack=%+v", prack)
+	}
+	info, err := BuildInfoRequest(cfg, "application/vnd.3gpp.ussd+xml", []byte("<ussd-data/>"))
+	if err != nil {
+		t.Fatalf("BuildInfoRequest() error = %v", err)
+	}
+	if info.Method != "INFO" || info.Headers["CSeq"] != "3 INFO" || info.Headers["Contact"] != "<sip:user@192.0.2.10:5060>" || info.Headers["Content-Type"] != "application/vnd.3gpp.ussd+xml" {
+		t.Fatalf("info=%+v", info)
 	}
 	message, err := BuildMessageRequest(cfg, "text/plain;charset=UTF-8", []byte("hello"))
 	if err != nil {

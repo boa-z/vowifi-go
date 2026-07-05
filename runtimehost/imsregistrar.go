@@ -16,6 +16,7 @@ import (
 type IMSRegisterTransportFactory func(IMSRegistrationConfig, voiceclient.IMSProfile, string, string) voiceclient.SIPRegisterTransport
 type IMSVoiceTransportFactory func(IMSRegistrationConfig, voiceclient.IMSProfile, voiceclient.RegistrationBinding) voiceclient.SIPRequestTransport
 type IMSSMSTransportFactory func(IMSRegistrationConfig, voiceclient.IMSProfile, voiceclient.RegistrationBinding, voiceclient.SIPRequestTransport) messaging.SMSTransport
+type IMSUSSDTransportFactory func(IMSRegistrationConfig, voiceclient.IMSProfile, voiceclient.RegistrationBinding, voiceclient.SIPRequestTransport) messaging.USSDTransport
 
 type WireIMSRegistrar struct {
 	Transport             voiceclient.SIPRegisterTransport
@@ -24,6 +25,8 @@ type WireIMSRegistrar struct {
 	VoiceFactory          IMSVoiceTransportFactory
 	SMSTransport          messaging.SMSTransport
 	SMSFactory            IMSSMSTransportFactory
+	USSDTransport         messaging.USSDTransport
+	USSDFactory           IMSUSSDTransportFactory
 	RegistrarURI          string
 	ContactURI            string
 	ContactHost           string
@@ -95,6 +98,7 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 	}
 	voiceTransport := r.voiceTransport(cfg, profile, result.Binding)
 	smsTransport := r.smsTransport(cfg, profile, result.Binding, voiceTransport)
+	ussdTransport := r.ussdTransport(cfg, profile, result.Binding, voiceTransport)
 	return IMSRegistrationResult{
 		Registered:     result.Registered,
 		StatusCode:     result.StatusCode,
@@ -104,6 +108,7 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		Binding:        result.Binding,
 		VoiceTransport: voiceTransport,
 		SMSTransport:   smsTransport,
+		USSDTransport:  ussdTransport,
 	}, nil
 }
 
@@ -136,6 +141,25 @@ func (r WireIMSRegistrar) smsTransport(cfg IMSRegistrationConfig, profile voicec
 		return nil
 	}
 	return messaging.IMSSMSTransport{
+		Transport:    voiceTransport,
+		Profile:      profile,
+		Registration: binding,
+		Domain:       profile.Domain,
+		UserAgent:    firstRuntimeNonEmpty(r.UserAgent, profile.UserAgent),
+	}
+}
+
+func (r WireIMSRegistrar) ussdTransport(cfg IMSRegistrationConfig, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, voiceTransport voiceclient.SIPRequestTransport) messaging.USSDTransport {
+	if r.USSDTransport != nil {
+		return r.USSDTransport
+	}
+	if r.USSDFactory != nil {
+		return r.USSDFactory(cfg, profile, binding, voiceTransport)
+	}
+	if voiceTransport == nil {
+		return nil
+	}
+	return &messaging.IMSUSSDTransport{
 		Transport:    voiceTransport,
 		Profile:      profile,
 		Registration: binding,

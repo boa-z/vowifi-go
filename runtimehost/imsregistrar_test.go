@@ -22,7 +22,17 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 			"Service-Route":    {"<sip:pcscf.ims.example;lr>"},
 		},
 	}}}
-	voiceTransport := &runtimeVoiceTransport{responses: []voiceclient.SIPResponse{{StatusCode: 202, Reason: "Accepted"}}}
+	voiceTransport := &runtimeVoiceTransport{responses: []voiceclient.SIPResponse{
+		{StatusCode: 202, Reason: "Accepted"},
+		{
+			StatusCode: 200,
+			Reason:     "OK",
+			Headers: map[string][]string{
+				"To":      {"<sip:*100%23@ims.example;user=dialstring>;tag=as-tag"},
+				"Contact": {"<sip:ussd-as@ims.example>"},
+			},
+		},
+	}}
 	res, err := WireIMSRegistrar{
 		Transport:      transport,
 		VoiceTransport: voiceTransport,
@@ -60,6 +70,9 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 	if res.SMSTransport == nil {
 		t.Fatal("SMSTransport=nil, want IMS SIP MESSAGE transport")
 	}
+	if res.USSDTransport == nil {
+		t.Fatal("USSDTransport=nil, want IMS USSI transport")
+	}
 	smsResult, err := res.SMSTransport.SendSMSPart(context.Background(), messaging.SMSSendRequest{
 		Peer:      "+18005551212",
 		MessageID: "msg-1",
@@ -70,6 +83,16 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 	}
 	if len(voiceTransport.requests) != 1 || voiceTransport.requests[0].Method != "MESSAGE" || voiceTransport.requests[0].Headers["Route"] != "<sip:pcscf.ims.example;lr>" {
 		t.Fatalf("SMS request=%+v", voiceTransport.requests)
+	}
+	ussdResult, err := res.USSDTransport.ExecuteUSSD(context.Background(), messaging.USSDRequest{SessionID: "ussd-1", Command: "*100#"})
+	if err != nil {
+		t.Fatalf("ExecuteUSSD() result=%+v err=%v", ussdResult, err)
+	}
+	if ussdResult.Done || len(voiceTransport.requests) != 2 || voiceTransport.requests[1].Method != "INVITE" || voiceTransport.requests[1].Headers["Recv-Info"] != messaging.IMSUSSDInfoPackage {
+		t.Fatalf("USSD result=%+v request=%+v", ussdResult, voiceTransport.requests)
+	}
+	if len(voiceTransport.writes) != 1 || voiceTransport.writes[0].Method != "ACK" {
+		t.Fatalf("USSD ACK writes=%+v", voiceTransport.writes)
 	}
 	if len(transport.requests) != 1 {
 		t.Fatalf("requests=%d", len(transport.requests))

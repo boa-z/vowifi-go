@@ -327,12 +327,14 @@ func TestStartWiresSMSTransport(t *testing.T) {
 }
 
 func TestStartUsesIMSRegistrarSMSTransport(t *testing.T) {
-	transport := &runtimeSMSTransport{}
+	smsTransport := &runtimeSMSTransport{}
+	ussdTransport := &runtimeUSSDTransport{}
 	registrar := &testIMSRegistrar{result: IMSRegistrationResult{
-		Registered:   true,
-		StatusCode:   200,
-		Reason:       "OK",
-		SMSTransport: transport,
+		Registered:    true,
+		StatusCode:    200,
+		Reason:        "OK",
+		SMSTransport:  smsTransport,
+		USSDTransport: ussdTransport,
 	}}
 	inst, err := Start(context.Background(), StartRequest{
 		DeviceID:     "dev-ims-sms",
@@ -346,8 +348,15 @@ func TestStartUsesIMSRegistrarSMSTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendSMSWithOptions() error = %v", err)
 	}
-	if out.PartsTotal != 1 || len(transport.requests) != 1 || transport.requests[0].Peer != "+18005551212" {
-		t.Fatalf("outcome=%+v requests=%+v", out, transport.requests)
+	if out.PartsTotal != 1 || len(smsTransport.requests) != 1 || smsTransport.requests[0].Peer != "+18005551212" {
+		t.Fatalf("outcome=%+v requests=%+v", out, smsTransport.requests)
+	}
+	ussd, err := inst.Service().SendUSSD(context.Background(), "*100#")
+	if err != nil {
+		t.Fatalf("SendUSSD() error = %v", err)
+	}
+	if ussd.Text != "ok" || len(ussdTransport.executeRequests) != 1 || ussdTransport.executeRequests[0].Command != "*100#" {
+		t.Fatalf("ussd=%+v requests=%+v", ussd, ussdTransport.executeRequests)
 	}
 }
 
