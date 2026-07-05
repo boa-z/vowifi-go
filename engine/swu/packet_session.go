@@ -23,6 +23,15 @@ type ESPPacketTransport interface {
 	SendESPPacket(context.Context, []byte) error
 }
 
+type ESPPacketReceiver interface {
+	ReadESPPacket(context.Context) ([]byte, error)
+}
+
+type ESPPacketReadWriteTransport interface {
+	ESPPacketTransport
+	ESPPacketReceiver
+}
+
 type ESPPacketTransportFunc func(context.Context, []byte) error
 
 func (f ESPPacketTransportFunc) SendESPPacket(ctx context.Context, packet []byte) error {
@@ -68,6 +77,11 @@ type PacketTunnelSession interface {
 	PacketStats() PacketTunnelStats
 }
 
+type PacketTunnelReadSession interface {
+	PacketTunnelSession
+	ReadInnerPacket(context.Context) (PacketTunnelPacket, error)
+}
+
 type PacketSessionConfig struct {
 	Result        TunnelResult
 	ChildSA       ikev2.ChildSAResult
@@ -92,7 +106,10 @@ type PacketSession struct {
 	closed        bool
 }
 
-var _ PacketTunnelSession = (*PacketSession)(nil)
+var (
+	_ PacketTunnelSession     = (*PacketSession)(nil)
+	_ PacketTunnelReadSession = (*PacketSession)(nil)
+)
 
 func NewPacketSession(cfg PacketSessionConfig) (*PacketSession, error) {
 	if cfg.Transport == nil {
@@ -303,6 +320,37 @@ func (s *PacketSession) ReceiveESPPacket(ctx context.Context, packet []byte) (Pa
 		NextHeader: out.NextHeader,
 		Payload:    payload,
 	}, nil
+}
+
+func (s *PacketSession) ReadInnerPacket(ctx context.Context) (PacketTunnelPacket, error) {
+	if s == nil {
+		return PacketTunnelPacket{}, ErrInvalidPacketTunnel
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := contextReady(ctx); err != nil {
+		s.recordInboundError(err)
+		return PacketTunnelPacket{}, err
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return PacketTunnelPacket{}, ErrPacketTunnelClosed
+	}
+	receiver, ok := s.transport.(ESPPacketReceiver)
+	s.mu.Unlock()
+	if !ok {
+		err := fmt.Errorf("%w: transport cannot read ESP packets", ErrInvalidPacketTunnel)
+		s.recordInboundError(err)
+		return PacketTunnelPacket{}, err
+	}
+	packet, err := receiver.ReadESPPacket(ctx)
+	if err != nil {
+		s.recordInboundError(err)
+		return PacketTunnelPacket{}, err
+	}
+	return s.ReceiveESPPacket(ctx, packet)
 }
 
 func (s *PacketSession) PacketStats() PacketTunnelStats {

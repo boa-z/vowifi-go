@@ -77,6 +77,33 @@ func TestPacketSessionDefaultResultIsReady(t *testing.T) {
 	}
 }
 
+func TestPacketSessionReadInnerPacketUsesReadableTransport(t *testing.T) {
+	wire := &captureESPPacketTransport{}
+	a, err := NewPacketSession(PacketSessionConfig{ChildSA: packetChildSA(true), Transport: wire})
+	if err != nil {
+		t.Fatalf("NewPacketSession(a) error = %v", err)
+	}
+	b, err := NewPacketSession(PacketSessionConfig{ChildSA: packetChildSA(false), Transport: wire})
+	if err != nil {
+		t.Fatalf("NewPacketSession(b) error = %v", err)
+	}
+	inner := []byte{0x45, 0x00, 0x00, 0x14, 0xde, 0xad}
+	if err := a.SendInnerPacket(context.Background(), inner); err != nil {
+		t.Fatalf("SendInnerPacket() error = %v", err)
+	}
+	got, err := b.ReadInnerPacket(context.Background())
+	if err != nil {
+		t.Fatalf("ReadInnerPacket() error = %v", err)
+	}
+	if got.NextHeader != esp.NextHeaderIPv4 || !bytes.Equal(got.Payload, inner) {
+		t.Fatalf("got=%+v payload=%x", got, got.Payload)
+	}
+	stats := b.PacketStats()
+	if stats.InboundInnerPackets != 1 || stats.InboundESPPackets != 1 {
+		t.Fatalf("stats=%+v", stats)
+	}
+}
+
 func TestPacketSessionRejectsReplayAndCountsDrop(t *testing.T) {
 	transport := &captureESPPacketTransport{}
 	a, err := NewPacketSession(PacketSessionConfig{ChildSA: packetChildSA(true), Transport: transport})
@@ -167,6 +194,15 @@ type captureESPPacketTransport struct {
 func (t *captureESPPacketTransport) SendESPPacket(ctx context.Context, packet []byte) error {
 	t.packets = append(t.packets, append([]byte(nil), packet...))
 	return nil
+}
+
+func (t *captureESPPacketTransport) ReadESPPacket(ctx context.Context) ([]byte, error) {
+	if len(t.packets) == 0 {
+		return nil, errors.New("no packets")
+	}
+	packet := append([]byte(nil), t.packets[0]...)
+	t.packets = t.packets[1:]
+	return packet, nil
 }
 
 func (t *captureESPPacketTransport) Close(ctx context.Context) error {

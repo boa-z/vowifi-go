@@ -68,6 +68,9 @@ protocol layers needed by VoHive:
   SAs from the CHILD_SA result, auto-selects IPv4/IPv6 next headers, sends ESP
   packets through a transport boundary, opens inbound ESP packets, tracks
   packet/byte/error/drop counters, and rejects replayed traffic
+- UDP/NAT-T ESP packet transport for the userspace dataplane, including
+  reusable UDP socket management, raw ESP send/receive, NAT keepalive and
+  non-ESP marker filtering, deadline handling, and close semantics
 
 Kernel ESP SA installation, real TUN/routing integration, SRTP media, advanced
 RTCP feedback handling, and complete inbound IMS call handling are still
