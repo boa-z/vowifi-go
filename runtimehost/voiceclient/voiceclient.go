@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -46,15 +47,17 @@ type DigestAuthInput struct {
 }
 
 type RegistrationBinding struct {
-	ContactURI       string
-	PublicIdentity   string
-	AssociatedURIs   []string
-	ServiceRoutes    []string
-	Paths            []string
-	SecurityServer   []string
-	SecurityVerify   []string
-	Expires          int
-	RegistrarContact string
+	ContactURI        string
+	PublicIdentity    string
+	AssociatedURIs    []string
+	ServiceRoutes     []string
+	Paths             []string
+	SecurityClient    string
+	SecurityServer    []string
+	SecurityVerify    []string
+	SecurityAgreement SecurityAgreement
+	Expires           int
+	RegistrarContact  string
 }
 
 type RegisterMessage struct {
@@ -75,14 +78,16 @@ type SIPRegisterTransport interface {
 }
 
 type RegisterSession struct {
-	Transport    SIPRegisterTransport
-	AKAProvider  sim.AKAProvider
-	Profile      IMSProfile
-	RegistrarURI string
-	ContactURI   string
-	CallID       string
-	CNonce       string
-	Expires      int
+	Transport      SIPRegisterTransport
+	AKAProvider    sim.AKAProvider
+	Profile        IMSProfile
+	RegistrarURI   string
+	ContactURI     string
+	CallID         string
+	CNonce         string
+	Expires        int
+	SecurityClient SecurityAgreement
+	SecurityRandom io.Reader
 }
 
 type RegisterResult struct {
@@ -249,7 +254,7 @@ func BuildRegisterHeaders(profile IMSProfile, contactURI, callID, cseq string) m
 		"Supported":            "path, gruu, outbound, sec-agree, 100rel, timer",
 		"Require":              "sec-agree",
 		"P-Preferred-Identity": "<" + impu + ">",
-		"Security-Client":      `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=0;spi-s=0;port-c=0;port-s=0`,
+		"Security-Client":      BuildSecurityClientHeader(DefaultSecurityClientAgreement(nil)),
 	}
 	return headers
 }
@@ -271,6 +276,8 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 	if expires <= 0 {
 		expires = 3600
 	}
+	securityClient := s.securityClientAgreement()
+	securityClientHeader := BuildSecurityClientHeader(securityClient)
 
 	attempts := 0
 	cseq := 1
@@ -280,6 +287,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 			Headers: BuildRegisterHeaders(s.Profile, contactURI, callID, strconv.Itoa(cseq)),
 		}
 		msg.Headers["Expires"] = strconv.Itoa(expires)
+		msg.Headers["Security-Client"] = securityClientHeader
 		if strings.TrimSpace(authHeaderName) != "" && strings.TrimSpace(authz) != "" {
 			msg.Headers[authHeaderName] = authz
 		}
@@ -326,7 +334,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 			StatusCode: resp.StatusCode,
 			Reason:     resp.Reason,
 			Attempts:   attempts,
-			Binding:    BuildRegistrationBinding(s.Profile, contactURI, resp, expires),
+			Binding:    buildRegistrationBinding(s.Profile, contactURI, resp, expires, securityClient, nil),
 		}, nil
 	}
 	if resp.StatusCode != 401 && resp.StatusCode != 407 {
@@ -345,6 +353,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 	if err != nil {
 		return RegisterResult{StatusCode: resp.StatusCode, Reason: resp.Reason, Attempts: attempts}, err
 	}
+	securityHeaders := resp.Headers
 
 	authzInput, syncFailure, err := s.digestAuthInputForChallenge(ch, registrarURI)
 	if err != nil {
@@ -372,7 +381,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 				Reason:     resp2.Reason,
 				Attempts:   attempts,
 				Challenge:  ch,
-				Binding:    BuildRegistrationBinding(s.Profile, contactURI, resp2, expires),
+				Binding:    buildRegistrationBinding(s.Profile, contactURI, resp2, expires, securityClient, securityHeaders),
 				AuthHeader: authz,
 			}, nil
 		}
@@ -403,6 +412,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		ch = nextChallenge
 		authzHeader = nextAuthzHeader
 		nextChallengeHeaders := resp2.Headers
+		securityHeaders = nextChallengeHeaders
 		cseq++
 		resp2, err = sendRegister(cseq, authzHeader, authz, nextChallengeHeaders)
 		if err != nil {
@@ -419,13 +429,20 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		Reason:     resp2.Reason,
 		Attempts:   attempts,
 		Challenge:  ch,
-		Binding:    BuildRegistrationBinding(s.Profile, contactURI, resp2, expires),
+		Binding:    buildRegistrationBinding(s.Profile, contactURI, resp2, expires, securityClient, securityHeaders),
 		AuthHeader: authz,
 	}
 	if !result.Registered {
 		return result, fmt.Errorf("%w: %d %s", ErrRegistrationRejected, resp2.StatusCode, resp2.Reason)
 	}
 	return result, nil
+}
+
+func (s RegisterSession) securityClientAgreement() SecurityAgreement {
+	if isZeroSecurityAgreement(s.SecurityClient) {
+		return DefaultSecurityClientAgreement(s.SecurityRandom)
+	}
+	return completeSecurityAgreement(s.SecurityClient)
 }
 
 func (s RegisterSession) digestAuthInputForChallenge(ch DigestChallenge, registrarURI string) (DigestAuthInput, bool, error) {
@@ -493,18 +510,34 @@ func SelectDigestChallenge(headers map[string][]string, name string) (DigestChal
 }
 
 func BuildRegistrationBinding(profile IMSProfile, contactURI string, resp RegisterResponse, requestedExpires int) RegistrationBinding {
+	return buildRegistrationBinding(profile, contactURI, resp, requestedExpires, SecurityAgreement{}, nil)
+}
+
+func buildRegistrationBinding(profile IMSProfile, contactURI string, resp RegisterResponse, requestedExpires int, securityClient SecurityAgreement, securityFallback map[string][]string) RegistrationBinding {
 	associated := normalizeAddressValues(headerListValues(resp.Headers, "P-Associated-URI"))
 	securityServer := trimHeaderValues(headerListValues(resp.Headers, "Security-Server"))
+	if len(securityServer) == 0 && securityFallback != nil {
+		securityServer = trimHeaderValues(headerListValues(securityFallback, "Security-Server"))
+	}
+	securityVerify := append([]string(nil), securityServer...)
+	securityClientHeader := ""
+	if !isZeroSecurityAgreement(securityClient) {
+		securityClientHeader = BuildSecurityClientHeader(securityClient)
+	}
 	binding := RegistrationBinding{
 		ContactURI:       strings.TrimSpace(contactURI),
 		PublicIdentity:   defaultPublicIdentity(profile, associated),
 		AssociatedURIs:   associated,
 		ServiceRoutes:    trimHeaderValues(headerListValues(resp.Headers, "Service-Route")),
 		Paths:            trimHeaderValues(headerListValues(resp.Headers, "Path")),
+		SecurityClient:   securityClientHeader,
 		SecurityServer:   securityServer,
-		SecurityVerify:   append([]string(nil), securityServer...),
+		SecurityVerify:   securityVerify,
 		Expires:          registrationExpires(resp.Headers, contactURI, requestedExpires),
 		RegistrarContact: firstTrimmed(headerListValues(resp.Headers, "Contact")...),
+	}
+	if selected, ok := SelectSecurityAgreement(binding.SecurityServer, securityClient); ok {
+		binding.SecurityAgreement = selected
 	}
 	if len(binding.AssociatedURIs) == 0 && binding.PublicIdentity != "" {
 		binding.AssociatedURIs = []string{binding.PublicIdentity}

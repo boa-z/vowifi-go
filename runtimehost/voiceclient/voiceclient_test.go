@@ -123,8 +123,32 @@ func TestBuildRegisterHeaders(t *testing.T) {
 	if !strings.Contains(headers["Security-Client"], "ipsec-3gpp") {
 		t.Fatalf("Security-Client=%q", headers["Security-Client"])
 	}
+	if strings.Contains(headers["Security-Client"], "spi-c=0") || strings.Contains(headers["Security-Client"], "spi-s=0") ||
+		!strings.Contains(headers["Security-Client"], "port-c=5062") || !strings.Contains(headers["Security-Client"], "port-s=5063") {
+		t.Fatalf("Security-Client has invalid default proposal: %q", headers["Security-Client"])
+	}
 	if !strings.Contains(headers["Allow"], "INFO") {
 		t.Fatalf("Allow=%q", headers["Allow"])
+	}
+}
+
+func TestParseAndSelectSecurityAgreement(t *testing.T) {
+	values := []string{`ipsec-3gpp;q=0.1;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063, ipsec-3gpp;q=0.9;alg=hmac-md5-96;ealg=null;spi-c=333;spi-s=444;port-c=5064;port-s=5065`}
+	selected, ok := SelectSecurityAgreement(values, SecurityAgreement{
+		Protocol:            "ipsec-3gpp",
+		Algorithm:           "hmac-md5-96",
+		EncryptionAlgorithm: "null",
+	})
+	if !ok {
+		t.Fatal("SelectSecurityAgreement() ok=false")
+	}
+	if selected.SPIClient != 333 || selected.SPIServer != 444 || selected.PortClient != 5064 || selected.PortServer != 5065 ||
+		selected.Algorithm != "hmac-md5-96" || selected.Parameters["q"] != "0.9" {
+		t.Fatalf("selected=%+v", selected)
+	}
+	client := BuildSecurityClientHeader(SecurityAgreement{SPIClient: 7001, SPIServer: 7002, PortClient: 6000, PortServer: 6001})
+	if client != "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=7001;spi-s=7002;port-c=6000;port-s=6001" {
+		t.Fatalf("Security-Client=%q", client)
 	}
 }
 
@@ -191,8 +215,19 @@ func TestRegisterSessionHandlesAKAv1MD5Challenge(t *testing.T) {
 	if got := transport.requests[1].Headers["Security-Verify"]; !strings.Contains(got, "spi-c=111") {
 		t.Fatalf("Security-Verify=%q", got)
 	}
+	if first, second := transport.requests[0].Headers["Security-Client"], transport.requests[1].Headers["Security-Client"]; first == "" || first != second || strings.Contains(first, "spi-c=0") {
+		t.Fatalf("Security-Client not stable/non-zero: first=%q second=%q", first, second)
+	}
 	if result.Binding.PublicIdentity != "sip:user@example" || result.Binding.Expires != 1800 || len(result.Binding.ServiceRoutes) != 2 {
 		t.Fatalf("binding=%+v", result.Binding)
+	}
+	if result.Binding.SecurityClient != transport.requests[0].Headers["Security-Client"] ||
+		len(result.Binding.SecurityServer) != 1 ||
+		result.Binding.SecurityAgreement.SPIClient != 111 ||
+		result.Binding.SecurityAgreement.SPIServer != 222 ||
+		result.Binding.SecurityAgreement.PortClient != 5062 ||
+		result.Binding.SecurityAgreement.PortServer != 5063 {
+		t.Fatalf("security binding=%+v", result.Binding)
 	}
 	if got := strings.ToUpper(hex.EncodeToString(aka.rand)); got != strings.ToUpper(hex.EncodeToString(bytesFrom(0x10, 16))) {
 		t.Fatalf("RAND=%s", got)
@@ -260,6 +295,10 @@ func TestRegisterSessionHandlesAKASynchronizationFailure(t *testing.T) {
 	}
 	if got := transport.requests[2].Headers["Security-Verify"]; !strings.Contains(got, "spi-c=333") {
 		t.Fatalf("Security-Verify=%q", got)
+	}
+	if result.Binding.SecurityAgreement.SPIClient != 333 || result.Binding.SecurityAgreement.SPIServer != 444 ||
+		len(result.Binding.SecurityServer) != 1 || !strings.Contains(result.Binding.SecurityServer[0], "spi-c=333") {
+		t.Fatalf("security binding=%+v", result.Binding)
 	}
 	if len(aka.rands) != 2 || !bytesEqual(aka.rands[1], bytesFrom(0x60, 16)) {
 		t.Fatalf("AKA rands=%x", aka.rands)
