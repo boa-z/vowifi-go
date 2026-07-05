@@ -50,6 +50,10 @@ const (
 	AttributeClientErrorCode uint8 = 22
 	AttributeKDFInput        uint8 = 23
 	AttributeKDF             uint8 = 24
+	AttributeIV              uint8 = 129
+	AttributeEncrData        uint8 = 130
+	AttributeNextPseudonym   uint8 = 132
+	AttributeNextReauthID    uint8 = 133
 	AttributeCheckcode       uint8 = 134
 	AttributeResultInd       uint8 = 135
 )
@@ -276,6 +280,14 @@ func ClientErrorCodeAttribute(code uint16) Attribute {
 	return Attribute{Type: AttributeClientErrorCode, Data: b[:]}
 }
 
+func IVAttribute(iv16 []byte) Attribute {
+	return FixedAttribute(AttributeIV, iv16)
+}
+
+func EncrDataAttribute(ciphertext []byte) Attribute {
+	return FixedAttribute(AttributeEncrData, ciphertext)
+}
+
 func CheckcodeAttribute(checkcode []byte) Attribute {
 	return FixedAttribute(AttributeCheckcode, checkcode)
 }
@@ -382,6 +394,17 @@ func (a Attribute) NotificationValue() (uint16, error) {
 
 func (a Attribute) ClientErrorCodeValue() (uint16, error) {
 	return a.directUint16Value()
+}
+
+func (a Attribute) IVValue() ([]byte, error) {
+	return a.FixedValue(16)
+}
+
+func (a Attribute) EncrDataValue() ([]byte, error) {
+	if len(a.Data) < 2 {
+		return nil, ErrInvalidAttribute
+	}
+	return append([]byte(nil), a.Data[2:]...), nil
 }
 
 func (a Attribute) CheckcodeValue() ([]byte, error) {

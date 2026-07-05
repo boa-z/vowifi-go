@@ -1,6 +1,8 @@
 package eapaka
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -24,10 +26,11 @@ const (
 const AKAPrimeKDFDefault uint16 = 1
 
 var (
-	ErrInvalidAKAChallenge = errors.New("invalid eap-aka challenge")
-	ErrInvalidMAC          = errors.New("invalid eap-aka mac")
-	ErrInvalidKeyMaterial  = errors.New("invalid eap-aka key material")
-	ErrUnsupportedKDF      = errors.New("unsupported eap-aka prime kdf")
+	ErrInvalidAKAChallenge  = errors.New("invalid eap-aka challenge")
+	ErrInvalidEncryptedData = errors.New("invalid eap-aka encrypted data")
+	ErrInvalidMAC           = errors.New("invalid eap-aka mac")
+	ErrInvalidKeyMaterial   = errors.New("invalid eap-aka key material")
+	ErrUnsupportedKDF       = errors.New("unsupported eap-aka prime kdf")
 )
 
 type Keys struct {
@@ -267,6 +270,63 @@ func BuildSynchronizationFailureResponse(request Packet, auts []byte) (Packet, e
 		Subtype:    SubtypeSynchronizationFailure,
 		Attributes: attrs,
 	}, nil
+}
+
+func EncryptAttributes(kEncr, iv []byte, attrs []Attribute) (Attribute, error) {
+	block, err := encryptedDataBlock(kEncr, iv)
+	if err != nil {
+		return Attribute{}, err
+	}
+	plaintext, err := MarshalAttributes(attrs)
+	if err != nil {
+		return Attribute{}, err
+	}
+	if rem := len(plaintext) % aes.BlockSize; rem != 0 {
+		padding, err := encryptedPaddingAttribute(aes.BlockSize - rem)
+		if err != nil {
+			return Attribute{}, err
+		}
+		rawPadding, err := padding.MarshalBinary()
+		if err != nil {
+			return Attribute{}, err
+		}
+		plaintext = append(plaintext, rawPadding...)
+	}
+	ciphertext := make([]byte, len(plaintext))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, plaintext)
+	return EncrDataAttribute(ciphertext), nil
+}
+
+func DecryptAttributes(kEncr, iv []byte, encrypted Attribute) ([]Attribute, error) {
+	if encrypted.Type != AttributeEncrData {
+		return nil, fmt.Errorf("%w: attribute type %d", ErrInvalidEncryptedData, encrypted.Type)
+	}
+	block, err := encryptedDataBlock(kEncr, iv)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := encrypted.EncrDataValue()
+	if err != nil {
+		return nil, err
+	}
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("%w: ciphertext length %d", ErrInvalidEncryptedData, len(ciphertext))
+	}
+	plaintext := make([]byte, len(ciphertext))
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plaintext, ciphertext)
+	attrs, err := ParseAttributes(plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEncryptedData, err)
+	}
+	return stripEncryptedPadding(attrs)
+}
+
+func DecryptEncryptedAttributes(kEncr []byte, ivAttr, encrypted Attribute) ([]Attribute, error) {
+	iv, err := ivAttr.IVValue()
+	if err != nil {
+		return nil, err
+	}
+	return DecryptAttributes(kEncr, iv, encrypted)
 }
 
 func ChallengeRANDAndAUTN(request Packet) (rand16, autn16 []byte, err error) {
@@ -537,6 +597,47 @@ func challengeKDFAttributes(attrs []Attribute) []Attribute {
 		}
 	}
 	return out
+}
+
+func encryptedDataBlock(kEncr, iv []byte) (cipher.Block, error) {
+	if len(kEncr) != aes.BlockSize {
+		return nil, fmt.Errorf("%w: K_encr length %d", ErrInvalidKeyMaterial, len(kEncr))
+	}
+	if len(iv) != aes.BlockSize {
+		return nil, fmt.Errorf("%w: IV length %d", ErrInvalidEncryptedData, len(iv))
+	}
+	return aes.NewCipher(kEncr)
+}
+
+func encryptedPaddingAttribute(totalLength int) (Attribute, error) {
+	switch totalLength {
+	case 4, 8, 12:
+		return Attribute{Type: AttributePadding, Data: make([]byte, totalLength-2)}, nil
+	default:
+		return Attribute{}, fmt.Errorf("%w: padding length %d", ErrInvalidEncryptedData, totalLength)
+	}
+}
+
+func stripEncryptedPadding(attrs []Attribute) ([]Attribute, error) {
+	for i, attr := range attrs {
+		if attr.Type != AttributePadding {
+			continue
+		}
+		if i != len(attrs)-1 {
+			return nil, fmt.Errorf("%w: AT_PADDING is not last", ErrInvalidEncryptedData)
+		}
+		totalLength := len(attr.Data) + 2
+		if totalLength != 4 && totalLength != 8 && totalLength != 12 {
+			return nil, fmt.Errorf("%w: padding length %d", ErrInvalidEncryptedData, totalLength)
+		}
+		for _, b := range attr.Data {
+			if b != 0 {
+				return nil, fmt.Errorf("%w: non-zero padding", ErrInvalidEncryptedData)
+			}
+		}
+		return attrs[:i], nil
+	}
+	return attrs, nil
 }
 
 func verifyChallengeMAC(eapType uint8, kAut, raw []byte) error {

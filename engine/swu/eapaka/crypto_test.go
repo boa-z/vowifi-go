@@ -2,6 +2,8 @@ package eapaka
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -113,6 +115,71 @@ func TestBuildChallengeResponseEchoesResultInd(t *testing.T) {
 	}
 	if err := VerifyMAC(keys.KAut, raw, nil); err != nil {
 		t.Fatalf("VerifyMAC(response) error = %v", err)
+	}
+}
+
+func TestEncryptDecryptAttributes(t *testing.T) {
+	kEncr := bytes.Repeat([]byte{0x11}, 16)
+	iv := bytes.Repeat([]byte{0x22}, 16)
+	attrs := []Attribute{
+		VariableAttribute(AttributeNextPseudonym, []byte("pseudo-123")),
+		ResultIndAttribute(),
+	}
+	encrypted, err := EncryptAttributes(kEncr, iv, attrs)
+	if err != nil {
+		t.Fatalf("EncryptAttributes() error = %v", err)
+	}
+	if encrypted.Type != AttributeEncrData {
+		t.Fatalf("encrypted type=%d, want AT_ENCR_DATA", encrypted.Type)
+	}
+	ciphertext, err := encrypted.EncrDataValue()
+	if err != nil {
+		t.Fatalf("EncrDataValue() error = %v", err)
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		t.Fatalf("ciphertext length=%d, want non-zero block multiple", len(ciphertext))
+	}
+	ivAttr := IVAttribute(iv)
+	gotIV, err := ivAttr.IVValue()
+	if err != nil {
+		t.Fatalf("IVValue() error = %v", err)
+	}
+	decrypted, err := DecryptEncryptedAttributes(kEncr, ivAttr, encrypted)
+	if err != nil {
+		t.Fatalf("DecryptEncryptedAttributes() error = %v", err)
+	}
+	if len(decrypted) != 2 || decrypted[0].Type != AttributeNextPseudonym || decrypted[1].Type != AttributeResultInd {
+		t.Fatalf("decrypted=%+v", decrypted)
+	}
+	value, err := decrypted[0].VariableValue()
+	if err != nil {
+		t.Fatalf("VariableValue() error = %v", err)
+	}
+	if string(value) != "pseudo-123" || !bytes.Equal(gotIV, iv) {
+		t.Fatalf("value=%q iv=%x", string(value), gotIV)
+	}
+}
+
+func TestDecryptAttributesRejectsBadPadding(t *testing.T) {
+	kEncr := bytes.Repeat([]byte{0x11}, 16)
+	iv := bytes.Repeat([]byte{0x22}, 16)
+	plaintext, err := MarshalAttributes([]Attribute{
+		ResultIndAttribute(),
+		VariableAttribute(AttributeNextPseudonym, []byte("abc")),
+		{Type: AttributePadding, Data: []byte{0, 1}},
+	})
+	if err != nil {
+		t.Fatalf("MarshalAttributes() error = %v", err)
+	}
+	block, err := aes.NewCipher(kEncr)
+	if err != nil {
+		t.Fatalf("NewCipher() error = %v", err)
+	}
+	ciphertext := make([]byte, len(plaintext))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, plaintext)
+	_, err = DecryptAttributes(kEncr, iv, EncrDataAttribute(ciphertext))
+	if !errors.Is(err, ErrInvalidEncryptedData) {
+		t.Fatalf("DecryptAttributes() err=%v, want ErrInvalidEncryptedData", err)
 	}
 }
 
