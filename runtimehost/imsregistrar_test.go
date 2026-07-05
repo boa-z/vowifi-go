@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iniwex5/vowifi-go/engine/sim"
 	"github.com/iniwex5/vowifi-go/engine/swu"
@@ -187,6 +189,85 @@ func TestWireIMSRegistrarUsesTunnelInnerIPForContact(t *testing.T) {
 	contact := transport.requests[0].Headers["Contact"]
 	if !strings.Contains(contact, "<sip:310280233641503@10.0.0.2:5064>") {
 		t.Fatalf("Contact=%q", contact)
+	}
+}
+
+func TestWireIMSRegistrarDefaultFlowReusesRegisterSocketForSMS(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer pc.Close()
+
+	type seenRequest struct {
+		addr string
+		wire string
+	}
+	seen := make(chan []seenRequest, 1)
+	go func() {
+		var requests []seenRequest
+		buf := make([]byte, 65535)
+		for i := 0; i < 2; i++ {
+			_ = pc.SetReadDeadline(time.Now().Add(time.Second))
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				seen <- append(requests, seenRequest{wire: "read error: " + err.Error()})
+				return
+			}
+			wire := string(append([]byte(nil), buf[:n]...))
+			requests = append(requests, seenRequest{addr: addr.String(), wire: wire})
+			resp := "SIP/2.0 200 OK\r\n" +
+				"P-Associated-URI: <sip:310280233641503@ims.mnc280.mcc310.3gppnetwork.org>\r\n" +
+				"Service-Route: <sip:pcscf.example;lr>\r\n" +
+				"Content-Length: 0\r\n\r\n"
+			if i == 1 {
+				resp = "SIP/2.0 202 Accepted\r\nContent-Length: 0\r\n\r\n"
+			}
+			_, _ = pc.WriteTo([]byte(resp), addr)
+		}
+		seen <- requests
+	}()
+
+	res, err := WireIMSRegistrar{
+		ServerAddr:     pc.LocalAddr().String(),
+		ContactHost:    "192.0.2.10",
+		ContactPort:    5060,
+		Timeout:        time.Second,
+		MaxRetransmits: 1,
+	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
+		DeviceID: "dev-1",
+		TraceID:  "trace-1",
+		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterIMS() error = %v", err)
+	}
+	defer func() {
+		if res.Close != nil {
+			_ = res.Close(context.Background())
+		}
+	}()
+	if _, ok := res.VoiceTransport.(*voiceclient.WireSIPFlow); !ok {
+		t.Fatalf("VoiceTransport=%T, want *WireSIPFlow", res.VoiceTransport)
+	}
+	smsResult, err := res.SMSTransport.SendSMSPart(context.Background(), messaging.SMSSendRequest{
+		Peer:      "+18005551212",
+		MessageID: "flow-sms",
+		Part:      messaging.SMSPart{PartNo: 1, TotalParts: 1, Text: "hello"},
+	})
+	if err != nil || smsResult.State != "accepted" {
+		t.Fatalf("SendSMSPart() result=%+v err=%v", smsResult, err)
+	}
+	requests := <-seen
+	if len(requests) != 2 {
+		t.Fatalf("requests=%d %+v", len(requests), requests)
+	}
+	if requests[0].addr == "" || requests[0].addr != requests[1].addr {
+		t.Fatalf("REGISTER and MESSAGE used different flows: %+v", requests)
+	}
+	if !strings.Contains(requests[0].wire, "REGISTER sip:ims.mnc280.mcc310.3gppnetwork.org SIP/2.0") ||
+		!strings.Contains(requests[1].wire, "MESSAGE sip:+18005551212@ims.mnc280.mcc310.3gppnetwork.org SIP/2.0") {
+		t.Fatalf("unexpected wires: %+v", requests)
 	}
 }
 

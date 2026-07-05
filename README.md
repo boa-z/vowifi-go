@@ -33,6 +33,9 @@ protocol layers needed by VoHive:
 - SIP UDP client transaction retransmission for REGISTER and IMS dialog
   requests, with configurable T1/T2-style backoff and INVITE provisional
   response handling
+- reusable SIP flow transport for REGISTER, MESSAGE, USSD, and voice dialog
+  requests, preserving the REGISTER socket/local port for IMS NAT pinholes and
+  offering explicit CRLF keepalive support
 - IMS REGISTER session flow with 401/407 authentication retry, associated URI,
   Service-Route, Path, Security-Server, and Contact expiry capture, plus a
   runtime `IMSRegistrar` adapter for the wire transport

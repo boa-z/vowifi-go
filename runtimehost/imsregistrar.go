@@ -58,19 +58,13 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		return IMSRegistrationResult{}, errors.New("IMS contact URI is empty")
 	}
 	transport := r.Transport
+	var defaultFlow *voiceclient.WireSIPFlow
 	if transport == nil && r.TransportFactory != nil {
 		transport = r.TransportFactory(cfg, profile, registrarURI, contactURI)
 	}
 	if transport == nil {
-		transport = voiceclient.WireRegisterTransport{
-			Network:               r.Network,
-			ServerAddr:            r.ServerAddr,
-			LocalAddr:             r.LocalAddr,
-			Timeout:               r.Timeout,
-			RetransmitInterval:    r.RetransmitInterval,
-			MaxRetransmitInterval: r.MaxRetransmitInterval,
-			MaxRetransmits:        r.MaxRetransmits,
-		}
+		defaultFlow = r.defaultSIPFlow()
+		transport = defaultFlow
 	}
 	expires := r.Expires
 	if expires <= 0 {
@@ -87,6 +81,9 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		Expires:      expires,
 	}.Register(ctx)
 	if err != nil {
+		if defaultFlow != nil {
+			_ = defaultFlow.Close()
+		}
 		return IMSRegistrationResult{
 			Registered: result.Registered,
 			StatusCode: result.StatusCode,
@@ -96,7 +93,7 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 			Binding:    result.Binding,
 		}, err
 	}
-	voiceTransport := r.voiceTransport(cfg, profile, result.Binding)
+	voiceTransport := r.voiceTransport(cfg, profile, result.Binding, defaultFlow)
 	smsTransport := r.smsTransport(cfg, profile, result.Binding, voiceTransport)
 	ussdTransport := r.ussdTransport(cfg, profile, result.Binding, voiceTransport)
 	return IMSRegistrationResult{
@@ -109,15 +106,19 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		VoiceTransport: voiceTransport,
 		SMSTransport:   smsTransport,
 		USSDTransport:  ussdTransport,
+		Close:          closeDefaultSIPFlow(defaultFlow),
 	}, nil
 }
 
-func (r WireIMSRegistrar) voiceTransport(cfg IMSRegistrationConfig, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding) voiceclient.SIPRequestTransport {
+func (r WireIMSRegistrar) voiceTransport(cfg IMSRegistrationConfig, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, fallback voiceclient.SIPRequestTransport) voiceclient.SIPRequestTransport {
 	if r.VoiceTransport != nil {
 		return r.VoiceTransport
 	}
 	if r.VoiceFactory != nil {
 		return r.VoiceFactory(cfg, profile, binding)
+	}
+	if fallback != nil {
+		return fallback
 	}
 	return voiceclient.WireSIPTransport{
 		Network:               r.Network,
@@ -127,6 +128,27 @@ func (r WireIMSRegistrar) voiceTransport(cfg IMSRegistrationConfig, profile voic
 		RetransmitInterval:    r.RetransmitInterval,
 		MaxRetransmitInterval: r.MaxRetransmitInterval,
 		MaxRetransmits:        r.MaxRetransmits,
+	}
+}
+
+func (r WireIMSRegistrar) defaultSIPFlow() *voiceclient.WireSIPFlow {
+	return &voiceclient.WireSIPFlow{
+		Network:               r.Network,
+		ServerAddr:            r.ServerAddr,
+		LocalAddr:             r.LocalAddr,
+		Timeout:               r.Timeout,
+		RetransmitInterval:    r.RetransmitInterval,
+		MaxRetransmitInterval: r.MaxRetransmitInterval,
+		MaxRetransmits:        r.MaxRetransmits,
+	}
+}
+
+func closeDefaultSIPFlow(flow *voiceclient.WireSIPFlow) func(context.Context) error {
+	if flow == nil {
+		return nil
+	}
+	return func(context.Context) error {
+		return flow.Close()
 	}
 }
 

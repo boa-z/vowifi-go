@@ -221,6 +221,7 @@ type IMSRegistrationResult struct {
 	VoiceTransport voiceclient.SIPRequestTransport
 	SMSTransport   messaging.SMSTransport
 	USSDTransport  messaging.USSDTransport
+	Close          func(context.Context) error
 }
 
 type IMSRegistrar interface {
@@ -267,6 +268,7 @@ type Instance struct {
 	smsNotify func(deviceID, sender, content string, ts time.Time)
 	tunnel    swu.TunnelSession
 	voice     voicehost.Agent
+	imsClose  func(context.Context) error
 	stopped   bool
 }
 
@@ -384,7 +386,7 @@ func Start(ctx context.Context, req StartRequest) (*Instance, error) {
 		ussdTransport = imsResult.USSDTransport
 	}
 	svc.SetUSSDTransport(ussdTransport)
-	inst := &Instance{state: state, service: svc, tunnel: tunnel, voice: buildRuntimeVoiceAgent(req, imsResult)}
+	inst := &Instance{state: state, service: svc, tunnel: tunnel, voice: buildRuntimeVoiceAgent(req, imsResult), imsClose: imsResult.Close}
 	if req.VoiceGateway != nil {
 		req.VoiceGateway.RegisterAgent(req.DeviceID, inst)
 	}
@@ -452,7 +454,9 @@ func (i *Instance) Stop(ctx context.Context) error {
 	}
 	i.mu.Lock()
 	tunnel := i.tunnel
+	imsClose := i.imsClose
 	i.tunnel = nil
+	i.imsClose = nil
 	i.stopped = true
 	i.state.Phase = PhaseStopped
 	i.state.TunnelReady = false
@@ -462,6 +466,9 @@ func (i *Instance) Stop(ctx context.Context) error {
 	var err error
 	if tunnel != nil {
 		err = tunnel.Close(ctx)
+	}
+	if imsClose != nil {
+		err = errors.Join(err, imsClose(ctx))
 	}
 	i.notify(ctx)
 	return err
