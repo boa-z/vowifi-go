@@ -187,7 +187,13 @@ func (s *PacketSession) MOBIKE(ctx context.Context, req MOBIKERequest) (MOBIKERe
 		return MOBIKEResult{}, ErrPacketTunnelClosed
 	}
 	if handler != nil {
-		return handler(ctx, req)
+		res, err := handler(ctx, req)
+		if err != nil {
+			return MOBIKEResult{}, err
+		}
+		res = completeMOBIKEResult(res, req, result, "mobike updated")
+		s.applyMOBIKEResult(res)
+		return res, nil
 	}
 	return MOBIKEResult{
 		Rekeyed:          false,
@@ -199,6 +205,47 @@ func (s *PacketSession) MOBIKE(ctx context.Context, req MOBIKERequest) (MOBIKERe
 		Reason:           "mobike unsupported",
 		UpdatedAt:        time.Now(),
 	}, nil
+}
+
+func completeMOBIKEResult(res MOBIKEResult, req MOBIKERequest, current TunnelResult, fallbackReason string) MOBIKEResult {
+	if res.OuterLocalIP == "" {
+		res.OuterLocalIP = firstPacketNonEmpty(req.NewIP, req.OldIP, current.EPDGAddress)
+	}
+	if res.LocalInnerIP == "" {
+		res.LocalInnerIP = current.LocalInnerIP
+	}
+	if res.RemoteInnerIP == "" {
+		res.RemoteInnerIP = current.RemoteInnerIP
+	}
+	if !res.IKEEstablished {
+		res.IKEEstablished = current.IKEEstablished
+	}
+	if !res.IPsecEstablished {
+		res.IPsecEstablished = current.IPsecEstablished
+	}
+	if res.Reason == "" {
+		res.Reason = fallbackReason
+	}
+	if res.UpdatedAt.IsZero() {
+		res.UpdatedAt = time.Now()
+	}
+	return res
+}
+
+func (s *PacketSession) applyMOBIKEResult(res MOBIKEResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.result.LocalInnerIP = res.LocalInnerIP
+	s.result.RemoteInnerIP = res.RemoteInnerIP
+	s.result.IKEEstablished = res.IKEEstablished
+	s.result.IPsecEstablished = res.IPsecEstablished
+	s.result.Ready = res.IKEEstablished && res.IPsecEstablished
+	if res.Reason != "" {
+		s.result.Reason = res.Reason
+	}
 }
 
 func (s *PacketSession) Close(ctx context.Context) error {

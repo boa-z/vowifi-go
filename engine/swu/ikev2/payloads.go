@@ -15,11 +15,17 @@ const (
 )
 
 const (
+	NotifyUnacceptableAddresses     uint16 = 40
+	NotifyUnexpectedNATDetected     uint16 = 41
 	NotifyNATDetectionSourceIP      uint16 = 16388
 	NotifyNATDetectionDestinationIP uint16 = 16389
 	NotifyMOBIKESupported           uint16 = 16396
+	NotifyAdditionalIPv4Address     uint16 = 16397
+	NotifyAdditionalIPv6Address     uint16 = 16398
+	NotifyNoAdditionalAddresses     uint16 = 16399
 	NotifyUpdateSAAddresses         uint16 = 16400
 	NotifyCookie2                   uint16 = 16401
+	NotifyNoNATsAllowed             uint16 = 16402
 )
 
 const (
@@ -269,13 +275,60 @@ func NATDetectionNotify(notifyType uint16, spiI, spiR uint64, ip net.IP, port ui
 }
 
 func MOBIKESupportedNotify() Payload {
-	body, _ := (Notify{ProtocolID: ProtocolIKE, NotifyType: NotifyMOBIKESupported}).MarshalBinary()
+	body, _ := (Notify{NotifyType: NotifyMOBIKESupported}).MarshalBinary()
 	return Payload{Type: PayloadNotify, Body: body}
 }
 
 func UpdateSAAddressesNotify() Payload {
-	body, _ := (Notify{ProtocolID: ProtocolIKE, NotifyType: NotifyUpdateSAAddresses}).MarshalBinary()
+	body, _ := (Notify{NotifyType: NotifyUpdateSAAddresses}).MarshalBinary()
 	return Payload{Type: PayloadNotify, Body: body}
+}
+
+func NoAdditionalAddressesNotify() Payload {
+	body, _ := (Notify{NotifyType: NotifyNoAdditionalAddresses}).MarshalBinary()
+	return Payload{Type: PayloadNotify, Body: body}
+}
+
+func AdditionalIPAddressNotify(ip net.IP) (Payload, error) {
+	if v4 := ip.To4(); v4 != nil {
+		return NotifyWithZeroSPI(NotifyAdditionalIPv4Address, v4), nil
+	}
+	if v6 := ip.To16(); v6 != nil {
+		return NotifyWithZeroSPI(NotifyAdditionalIPv6Address, v6), nil
+	}
+	return Payload{}, ErrInvalidAddress
+}
+
+func Cookie2Notify(cookie []byte) (Payload, error) {
+	if len(cookie) < 8 || len(cookie) > 64 {
+		return Payload{}, fmt.Errorf("%w: COOKIE2 length %d", ErrInvalidNotify, len(cookie))
+	}
+	body, err := (Notify{NotifyType: NotifyCookie2, NotificationData: append([]byte(nil), cookie...)}).MarshalBinary()
+	if err != nil {
+		return Payload{}, err
+	}
+	return Payload{Type: PayloadNotify, Body: body}, nil
+}
+
+func NotifyWithZeroSPI(notifyType uint16, data []byte) Payload {
+	body, _ := (Notify{NotifyType: notifyType, NotificationData: append([]byte(nil), data...)}).MarshalBinary()
+	return Payload{Type: PayloadNotify, Body: body}
+}
+
+func FirstNotify(payloads []Payload, notifyType uint16) (Notify, bool, error) {
+	for _, payload := range payloads {
+		if payload.Type != PayloadNotify {
+			continue
+		}
+		notify, err := ParseNotify(payload.Body)
+		if err != nil {
+			return Notify{}, false, err
+		}
+		if notify.NotifyType == notifyType {
+			return notify, true, nil
+		}
+	}
+	return Notify{}, false, nil
 }
 
 func appendUint64(dst []byte, v uint64) []byte {

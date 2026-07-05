@@ -158,3 +158,56 @@ func TestNATDetectionNotify(t *testing.T) {
 		t.Fatalf("NATDetectionNotify() err=%v, want ErrInvalidNotify", err)
 	}
 }
+
+func TestMOBIKENotifyHelpers(t *testing.T) {
+	update, err := ParseNotify(UpdateSAAddressesNotify().Body)
+	if err != nil {
+		t.Fatalf("ParseNotify(update) error = %v", err)
+	}
+	if update.ProtocolID != 0 || update.NotifyType != NotifyUpdateSAAddresses || len(update.SPI) != 0 {
+		t.Fatalf("update=%+v", update)
+	}
+	noAdditional, err := ParseNotify(NoAdditionalAddressesNotify().Body)
+	if err != nil {
+		t.Fatalf("ParseNotify(noAdditional) error = %v", err)
+	}
+	if noAdditional.ProtocolID != 0 || noAdditional.NotifyType != NotifyNoAdditionalAddresses {
+		t.Fatalf("noAdditional=%+v", noAdditional)
+	}
+	cookie, err := Cookie2Notify([]byte("12345678"))
+	if err != nil {
+		t.Fatalf("Cookie2Notify() error = %v", err)
+	}
+	parsedCookie, err := ParseNotify(cookie.Body)
+	if err != nil {
+		t.Fatalf("ParseNotify(cookie) error = %v", err)
+	}
+	if parsedCookie.NotifyType != NotifyCookie2 || string(parsedCookie.NotificationData) != "12345678" {
+		t.Fatalf("parsedCookie=%+v", parsedCookie)
+	}
+	if _, err := Cookie2Notify([]byte("short")); !errors.Is(err, ErrInvalidNotify) {
+		t.Fatalf("Cookie2Notify(short) err=%v, want ErrInvalidNotify", err)
+	}
+	ipv4, err := AdditionalIPAddressNotify(net.ParseIP("192.0.2.44"))
+	if err != nil {
+		t.Fatalf("AdditionalIPAddressNotify(v4) error = %v", err)
+	}
+	parsedIPv4, err := ParseNotify(ipv4.Body)
+	if err != nil {
+		t.Fatalf("ParseNotify(v4) error = %v", err)
+	}
+	if parsedIPv4.NotifyType != NotifyAdditionalIPv4Address || hex.EncodeToString(parsedIPv4.NotificationData) != "c000022c" {
+		t.Fatalf("parsedIPv4=%+v", parsedIPv4)
+	}
+	ipv6, err := AdditionalIPAddressNotify(net.ParseIP("2001:db8::44"))
+	if err != nil {
+		t.Fatalf("AdditionalIPAddressNotify(v6) error = %v", err)
+	}
+	parsedIPv6, err := ParseNotify(ipv6.Body)
+	if err != nil {
+		t.Fatalf("ParseNotify(v6) error = %v", err)
+	}
+	if parsedIPv6.NotifyType != NotifyAdditionalIPv6Address || len(parsedIPv6.NotificationData) != 16 {
+		t.Fatalf("parsedIPv6=%+v", parsedIPv6)
+	}
+}

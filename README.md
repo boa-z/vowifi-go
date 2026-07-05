@@ -58,6 +58,9 @@ protocol layers needed by VoHive:
 - IKEv2 encrypted INFORMATIONAL exchange runner for empty DPD liveness probes
   and DELETE payloads for IKE/ESP/AH SA teardown, plus SWu close-handler
   wiring for graceful CHILD_SA/IKE_SA deletion
+- MOBIKE UPDATE_SA_ADDRESSES control-plane helpers with optional NAT-D and
+  address-set notifications, response rejection handling, and packet-session
+  state refresh on successful updates
 - encrypted IKE_AUTH EAP-Identity exchange scaffolding, including IDi, CP,
   CHILD_SA/TSi/TSr request payloads, responder EAP parsing, and
   EAP-Response/Identity transmission
