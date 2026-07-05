@@ -21,13 +21,15 @@ type IMSOutboundAgent struct {
 	LocalTag        string
 	SessionExpires  int
 	RemoteTargetURI string
+	MediaRelay      *RTPRelayConfig
 
 	mu      sync.Mutex
 	dialogs map[string]imsDialogState
 }
 
 type imsDialogState struct {
-	cfg voiceclient.DialogRequestConfig
+	cfg   voiceclient.DialogRequestConfig
+	relay *RTPRelaySession
 }
 
 func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCallRequest) (OutboundCallResult, error) {
@@ -57,7 +59,23 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 		UserAgent:       firstVoiceNonEmpty(a.UserAgent, a.Profile.UserAgent, "vowifi-go"),
 		SessionExpires:  a.SessionExpires,
 	}
-	invite, err := voiceclient.BuildInviteRequest(cfg, req.RawSDP)
+	inviteBody := append([]byte(nil), req.RawSDP...)
+	var relay *RTPRelaySession
+	if a.MediaRelay != nil {
+		createdRelay, relayErr := NewRTPRelaySession(ctx, *a.MediaRelay, req.RemoteSDP)
+		if relayErr != nil {
+			return OutboundCallResult{Accepted: false, Reason: "RTP relay setup failed"}, relayErr
+		}
+		relay = createdRelay
+		inviteBody = RewriteSDPMediaEndpoint(req.RawSDP, relay.IMSEndpoint())
+	}
+	closeRelayOnError := true
+	defer func() {
+		if closeRelayOnError && relay != nil {
+			_ = relay.Close()
+		}
+	}()
+	invite, err := voiceclient.BuildInviteRequest(cfg, inviteBody)
 	if err != nil {
 		return OutboundCallResult{Accepted: false, Reason: "build IMS INVITE failed"}, err
 	}
@@ -86,19 +104,31 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	if err != nil {
 		return OutboundCallResult{Accepted: false, Reason: "invalid IMS SDP answer"}, err
 	}
+	answerBody := append([]byte(nil), resp.Body...)
+	if relay != nil {
+		if err := relay.SetIMSRemote(localSDP); err != nil {
+			return OutboundCallResult{Accepted: false, Reason: "RTP relay remote setup failed"}, err
+		}
+		answerBody = RewriteSDPMediaEndpoint(resp.Body, relay.ClientEndpoint())
+		localSDP, err = ParseSDP(answerBody)
+		if err != nil {
+			return OutboundCallResult{Accepted: false, Reason: "invalid RTP relay SDP answer"}, err
+		}
+	}
 	a.mu.Lock()
 	if a.dialogs == nil {
 		a.dialogs = make(map[string]imsDialogState)
 	}
 	byeCfg := cfg
 	byeCfg.CSeq = 2
-	a.dialogs[strings.TrimSpace(req.CallID)] = imsDialogState{cfg: byeCfg}
+	a.dialogs[strings.TrimSpace(req.CallID)] = imsDialogState{cfg: byeCfg, relay: relay}
 	a.mu.Unlock()
+	closeRelayOnError = false
 	return OutboundCallResult{
 		Accepted: true,
 		Reason:   firstVoiceNonEmpty(resp.Reason, "OK"),
 		LocalSDP: localSDP,
-		RawSDP:   append([]byte(nil), resp.Body...),
+		RawSDP:   answerBody,
 	}, nil
 }
 
@@ -129,6 +159,9 @@ func (a *IMSOutboundAgent) EndVoiceCall(ctx context.Context, info DialogInfo) er
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("IMS BYE rejected: %d %s", resp.StatusCode, strings.TrimSpace(resp.Reason))
+	}
+	if state.relay != nil {
+		_ = state.relay.Close()
 	}
 	a.mu.Lock()
 	delete(a.dialogs, callID)

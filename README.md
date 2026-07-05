@@ -36,7 +36,8 @@ protocol layers needed by VoHive:
   and USSD session transport hooks
 - outbound voice dialog bridging helpers, SDP parsing/building, IMS INVITE/ACK/
   BYE/CANCEL request construction, route-set application, UDP/TCP SIP request
-  transport, outbound IMS voice agent, ACK/BYE dialog handling, and dialog
+  transport, outbound IMS voice agent, ACK/BYE dialog handling, RTP media relay
+  endpoint allocation, SDP media rewriting, packet forwarding, and dialog
   termination hooks
 - SWu tunnel manager/session contracts with startup validation, tunnel readiness
   state integration, shutdown cleanup, and MOBIKE delegation
@@ -64,9 +65,9 @@ protocol layers needed by VoHive:
   AES-CBC payload encryption, HMAC-SHA integrity checks, RFC 4303 padding,
   next-header restoration, and replay-window validation
 
-Kernel/userspace ESP SA installation, packet routing transport, RTP media relay,
-and complete inbound IMS call handling are still implemented incrementally
-behind these APIs.
+Kernel/userspace ESP SA installation, packet routing transport, SRTP/RTCP media
+features, and complete inbound IMS call handling are still implemented
+incrementally behind these APIs.
 
 ## Development
 
