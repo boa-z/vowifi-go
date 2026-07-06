@@ -723,6 +723,29 @@ func (s RegisterSession) Refresh(ctx context.Context, req RefreshRequest) (Refre
 		attempts++
 		return s.Transport.RoundTripRegister(ctx, cloneRegisterMessage(msg))
 	}
+	retryMinExpires := func(resp RegisterResponse, authHeaderName, authz string, authState DigestAuthState, challengeHeaders map[string][]string) (RegisterResponse, string, string, DigestAuthState, bool, error) {
+		if resp.StatusCode != 423 {
+			return resp, authHeaderName, authz, authState, false, nil
+		}
+		minExpires := minExpiresHeader(resp.Headers)
+		if minExpires <= expires {
+			return resp, authHeaderName, authz, authState, false, nil
+		}
+		expires = minExpires
+		nextAuthHeaderName := authHeaderName
+		nextAuthz := authz
+		nextAuthState := authState
+		if authState.Usable() {
+			var err error
+			nextAuthHeaderName, nextAuthz, nextAuthState, err = nextDigestAuthorization(authState, "REGISTER", registrarURI, authHeaderName, "")
+			if err != nil {
+				return resp, authHeaderName, authz, authState, true, err
+			}
+		}
+		cseq++
+		nextResp, err := sendRefresh(cseq, nextAuthHeaderName, nextAuthz, challengeHeaders)
+		return nextResp, nextAuthHeaderName, nextAuthz, nextAuthState, true, err
+	}
 	authHeaderName, authz, authState, err := nextDigestAuthorization(req.AuthState, "REGISTER", registrarURI, req.AuthHeaderName, req.AuthHeader)
 	if err != nil {
 		return RefreshResult{Attempts: attempts}, err
@@ -730,6 +753,10 @@ func (s RegisterSession) Refresh(ctx context.Context, req RefreshRequest) (Refre
 	resp, err := sendRefresh(cseq, authHeaderName, authz, nil)
 	if err != nil {
 		return RefreshResult{Attempts: attempts}, err
+	}
+	resp, authHeaderName, authz, authState, _, err = retryMinExpires(resp, authHeaderName, authz, authState, nil)
+	if err != nil {
+		return RefreshResult{Attempts: attempts, AuthHeader: authz, AuthHeaderName: authHeaderName, AuthState: authState}, err
 	}
 	if isSIPSuccess(resp.StatusCode) {
 		binding := mergeRefreshBinding(req.Binding, buildRegistrationBinding(s.Profile, contactURI, resp, expires, securityClientFromBinding(req.Binding), nil))
@@ -781,6 +808,10 @@ func (s RegisterSession) Refresh(ctx context.Context, req RefreshRequest) (Refre
 	resp2, err := sendRefresh(cseq, authHeaderName, authz, resp.Headers)
 	if err != nil {
 		return RefreshResult{Attempts: attempts}, err
+	}
+	resp2, authHeaderName, authz, authState, _, err = retryMinExpires(resp2, authHeaderName, authz, authState, resp.Headers)
+	if err != nil {
+		return RefreshResult{Attempts: attempts, AuthHeader: authz, AuthHeaderName: authHeaderName, AuthState: authState}, err
 	}
 	resultBinding := mergeRefreshBinding(req.Binding, buildRegistrationBinding(s.Profile, contactURI, resp2, expires, securityClientFromBinding(req.Binding), resp.Headers))
 	result := RefreshResult{

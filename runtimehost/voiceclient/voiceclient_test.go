@@ -900,6 +900,132 @@ func TestRegisterSessionRefreshRetriesDigestChallenge(t *testing.T) {
 	}
 }
 
+func TestRegisterSessionRefreshRetriesMinExpiresWithAuthState(t *testing.T) {
+	transport := &fakeRegisterTransport{responses: []RegisterResponse{
+		{
+			StatusCode: 423,
+			Reason:     "Interval Too Brief",
+			Headers:    map[string][]string{"Min-Expires": {"1200"}},
+		},
+		{
+			StatusCode: 200,
+			Reason:     "OK",
+			Headers: map[string][]string{
+				"Contact": {`<sip:user@192.0.2.10:5060>;expires=1200`},
+			},
+		},
+	}}
+	ch := DigestChallenge{Realm: "ims.example", Nonce: "nonce-refresh-min", Algorithm: "MD5", QOP: "auth"}
+	authState := newDigestAuthState("Authorization", ch, DigestAuthInput{
+		Method:   "REGISTER",
+		URI:      "sip:ims.example",
+		Username: "impi@example",
+		CNonce:   "cnonce",
+		NC:       1,
+	}, "")
+	session := RegisterSession{
+		Transport:    transport,
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:ims.example",
+		ContactURI:   "sip:user@192.0.2.10:5060",
+		CallID:       "call-refresh-min",
+		CNonce:       "cnonce",
+	}
+	result, err := session.Refresh(context.Background(), RefreshRequest{
+		Binding: RegistrationBinding{
+			ContactURI:     "sip:user@192.0.2.10:5060",
+			Expires:        600,
+			SecurityVerify: []string{"ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=501;spi-s=502;port-c=5064;port-s=5065"},
+		},
+		CSeq:      7,
+		AuthState: authState,
+	})
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if !result.Refreshed || result.Attempts != 2 || result.NextCSeq != 9 || result.Binding.Expires != 1200 || result.AuthState.nextNC != 4 {
+		t.Fatalf("result=%+v authState=%+v", result, result.AuthState)
+	}
+	if len(transport.requests) != 2 {
+		t.Fatalf("requests=%d, want 2", len(transport.requests))
+	}
+	first := transport.requests[0].Headers
+	if first["Expires"] != "600" || first["CSeq"] != "7 REGISTER" || !strings.Contains(first["Authorization"], "nc=00000002") {
+		t.Fatalf("first refresh headers=%+v", first)
+	}
+	second := transport.requests[1].Headers
+	if second["Expires"] != "1200" || second["CSeq"] != "8 REGISTER" ||
+		!strings.Contains(second["Authorization"], "nc=00000003") ||
+		!strings.Contains(second["Security-Verify"], "spi-c=501") {
+		t.Fatalf("min-expires refresh retry headers=%+v", second)
+	}
+}
+
+func TestRegisterSessionRefreshRetriesMinExpiresAfterChallenge(t *testing.T) {
+	transport := &fakeRegisterTransport{responses: []RegisterResponse{
+		{
+			StatusCode: 401,
+			Reason:     "Unauthorized",
+			Headers: map[string][]string{
+				"WWW-Authenticate": {`Digest realm="ims.example", nonce="nonce-refresh-min-challenge", algorithm=MD5, qop="auth"`},
+				"Security-Server":  {`ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=701;spi-s=702;port-c=5068;port-s=5069`},
+			},
+		},
+		{
+			StatusCode: 423,
+			Reason:     "Interval Too Brief",
+			Headers:    map[string][]string{"Min-Expires": {"900"}},
+		},
+		{
+			StatusCode: 200,
+			Reason:     "OK",
+			Headers: map[string][]string{
+				"Contact": {`<sip:user@192.0.2.10:5060>;expires=900`},
+			},
+		},
+	}}
+	session := RegisterSession{
+		Transport:    transport,
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:ims.example",
+		ContactURI:   "sip:user@192.0.2.10:5060",
+		CallID:       "call-refresh-min-challenge",
+		CNonce:       "cnonce",
+	}
+	result, err := session.Refresh(context.Background(), RefreshRequest{
+		Binding: RegistrationBinding{
+			ContactURI:     "sip:user@192.0.2.10:5060",
+			Expires:        600,
+			SecurityClient: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=101;spi-s=102;port-c=5062;port-s=5063",
+		},
+		CSeq: 11,
+	})
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if !result.Refreshed || result.Attempts != 3 || result.NextCSeq != 14 || result.Binding.Expires != 900 || result.AuthState.nextNC != 3 {
+		t.Fatalf("result=%+v authState=%+v", result, result.AuthState)
+	}
+	if len(transport.requests) != 3 {
+		t.Fatalf("requests=%d, want 3", len(transport.requests))
+	}
+	if first := transport.requests[0].Headers; first["Expires"] != "600" || first["CSeq"] != "11 REGISTER" || first["Authorization"] != "" {
+		t.Fatalf("first refresh headers=%+v", first)
+	}
+	second := transport.requests[1].Headers
+	if second["Expires"] != "600" || second["CSeq"] != "12 REGISTER" ||
+		!strings.Contains(second["Authorization"], "nc=00000001") ||
+		!strings.Contains(second["Security-Verify"], "spi-c=701") {
+		t.Fatalf("challenged refresh headers=%+v", second)
+	}
+	third := transport.requests[2].Headers
+	if third["Expires"] != "900" || third["CSeq"] != "13 REGISTER" ||
+		!strings.Contains(third["Authorization"], "nc=00000002") ||
+		!strings.Contains(third["Security-Verify"], "spi-c=701") {
+		t.Fatalf("min-expires challenged refresh retry headers=%+v", third)
+	}
+}
+
 func TestRegisterSessionRefreshReturnsRetryAfter(t *testing.T) {
 	transport := &fakeRegisterTransport{responses: []RegisterResponse{{
 		StatusCode: 503,

@@ -61,13 +61,15 @@ protocol layers needed by VoHive:
   503 or other transient 5xx statuses
 - SWu IKE configuration payload DNS extraction, exposing negotiated internal
   DNS servers to the runtime and using them for default IMS SRV/A/AAAA lookups
-- IMS REGISTER session flow with 401/407 authentication retry, associated URI,
-  Service-Route, Path, Security-Server, and Contact expiry capture, plus a
-  runtime `IMSRegistrar` adapter for the wire transport
+- IMS REGISTER session flow with 401/407 authentication retry, 423
+  `Min-Expires` retry handling, associated URI, Service-Route, Path,
+  Security-Server, and Contact expiry capture, plus a runtime `IMSRegistrar`
+  adapter for the wire transport
 - IMS REGISTER refresh maintenance on the reusable SIP flow, including
-  expiry-based renewal, retry scheduling, binding/auth/CSeq state updates,
-  full re-registration after recoverable refresh/flow failures, and shutdown
-  de-registration with the latest registration state
+  expiry-based renewal, 423 `Min-Expires` retry handling, retry scheduling,
+  binding/auth/CSeq state updates, full re-registration after recoverable
+  refresh/flow failures, and shutdown de-registration with the latest
+  registration state
 - IMS recovery re-registration on reusable SIP flows can advance to the next
   resolved P-CSCF candidate after recoverable failures, preserving the candidate
   list instead of repeatedly selecting the same failed proxy
