@@ -102,6 +102,9 @@ change there.
   Git identity is intentional and must remain the source of truth for new
   commits. Privacy cleanup applies to tracked worktree content, not to Git
   object identities.
+- Do not treat author or committer names and emails as leaked repository
+  content when they appear only in Git metadata. Fix the local Git identity if
+  it is wrong, but do not anonymize existing commit history for privacy cleanup.
 - Do not hard-code personal emails, local absolute paths, or private development
   machine details into tracked repository content such as docs, examples,
   generated files, scripts, or commit messages.
