@@ -106,6 +106,43 @@ func TestBuildKernelXFRMCommandsSupportsSHA1(t *testing.T) {
 	}
 }
 
+func TestBuildKernelXFRMCommandsSupportsAESGCM(t *testing.T) {
+	child := xfrmAESGCMChildSA()
+	commands, err := buildKernelXFRMCommands(KernelXFRMConfig{
+		ChildSA:           child,
+		OuterLocalIP:      "192.0.2.23",
+		OuterRemoteIP:     "198.51.100.7",
+		InnerLocalPrefix:  "10.10.0.2/32",
+		InnerRemotePrefix: "10.20.0.0/24",
+		NATTraversal: XFRMNATTraversalConfig{
+			Enabled:    true,
+			LocalPort:  55000,
+			RemotePort: 4500,
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildKernelXFRMCommands() error = %v", err)
+	}
+	wantOutbound := []string{
+		"xfrm", "state", "add",
+		"src", "192.0.2.23",
+		"dst", "198.51.100.7",
+		"proto", "esp",
+		"spi", "0xdeadbeef",
+		"reqid", "1",
+		"mode", "tunnel",
+		"aead", xfrmAeadAESGCMRFC4106, xfrmHexKey(child.Keys.Outbound.EncryptionKey), "128",
+		"encap", "espinudp", "55000", "4500", "0.0.0.0",
+	}
+	if !reflect.DeepEqual(commands[0].args, wantOutbound) {
+		t.Fatalf("outbound state args=%v, want %v", commands[0].args, wantOutbound)
+	}
+	wantInboundCrypto := []string{"aead", xfrmAeadAESGCMRFC4106, xfrmHexKey(child.Keys.Inbound.EncryptionKey), "128"}
+	if got := commands[1].args[15:19]; !reflect.DeepEqual(got, wantInboundCrypto) {
+		t.Fatalf("inbound crypto args=%v, want %v", got, wantInboundCrypto)
+	}
+}
+
 func TestBuildKernelXFRMCommandsAddsNATTraversalEncapsulation(t *testing.T) {
 	commands, err := buildKernelXFRMCommands(KernelXFRMConfig{
 		ChildSA:           xfrmChildSA(ikev2.INTEG_HMAC_SHA2_256_128),
@@ -257,7 +294,8 @@ func TestBuildKernelXFRMCommandsRejectsInvalidInput(t *testing.T) {
 		{name: "bad reqid", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ReqID = -1 })},
 		{name: "bad mark", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.Mark = "bad mark" })},
 		{name: "bad local spi", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ChildSA.LocalSPI = []byte{1, 2} })},
-		{name: "bad encryption", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ChildSA.Keys.Profile.EncryptionID = ikev2.ENCR_AES_GCM_16 })},
+		{name: "bad encryption", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ChildSA.Keys.Profile.EncryptionID = 0xffff })},
+		{name: "bad gcm key shape", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ChildSA.Keys.Profile.EncryptionID = ikev2.ENCR_AES_GCM_16 })},
 		{name: "bad integrity", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ChildSA.Keys.Profile.IntegrityID = ikev2.INTEG_AES_XCBC_96 })},
 		{name: "bad key length", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.ChildSA.Keys.Outbound.EncryptionKey = []byte{1, 2, 3} })},
 		{name: "xfrmi no ifid", cfg: withXFRM(base, func(c *KernelXFRMConfig) { c.XFRMInterface = XFRMInterfaceConfig{Name: "ipsec0", OuterDev: "wwan0"} })},
@@ -278,6 +316,24 @@ func TestBuildKernelXFRMCommandsRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("buildKernelXFRMCommands() err=%v, want ErrInvalidXFRMConfig", err)
 			}
 		})
+	}
+}
+
+func TestBuildKernelXFRMCommandsRejectsAESGCMWithIntegrityKey(t *testing.T) {
+	child := xfrmAESGCMChildSA()
+	child.Keys.Profile.IntegrityID = ikev2.INTEG_HMAC_SHA2_256_128
+	child.Keys.Profile.IntegrityKeyLength = 32
+	child.Keys.Outbound.IntegrityKey = bytes.Repeat([]byte{0x20}, 32)
+	child.Keys.Inbound.IntegrityKey = bytes.Repeat([]byte{0x40}, 32)
+	_, err := buildKernelXFRMCommands(KernelXFRMConfig{
+		ChildSA:           child,
+		OuterLocalIP:      "192.0.2.23",
+		OuterRemoteIP:     "198.51.100.7",
+		InnerLocalPrefix:  "10.10.0.2/32",
+		InnerRemotePrefix: "10.20.0.0/24",
+	})
+	if !errors.Is(err, ErrInvalidXFRMConfig) {
+		t.Fatalf("buildKernelXFRMCommands() err=%v, want ErrInvalidXFRMConfig", err)
 	}
 }
 
@@ -303,6 +359,25 @@ func xfrmChildSA(integrity uint16) ikev2.ChildSAResult {
 			Inbound: ikev2.ESPKeys{
 				EncryptionKey: bytes.Repeat([]byte{0x30}, 16),
 				IntegrityKey:  bytes.Repeat([]byte{0x40}, integLen),
+			},
+		},
+	}
+}
+
+func xfrmAESGCMChildSA() ikev2.ChildSAResult {
+	return ikev2.ChildSAResult{
+		LocalSPI:  []byte{0xca, 0xfe, 0xba, 0xbe},
+		RemoteSPI: []byte{0xde, 0xad, 0xbe, 0xef},
+		Keys: ikev2.ChildSAKeys{
+			Profile: ikev2.ESPKeyProfile{
+				EncryptionID:        ikev2.ENCR_AES_GCM_16,
+				EncryptionKeyLength: 20,
+			},
+			Outbound: ikev2.ESPKeys{
+				EncryptionKey: append(bytes.Repeat([]byte{0x10}, 16), 0x01, 0x02, 0x03, 0x04),
+			},
+			Inbound: ikev2.ESPKeys{
+				EncryptionKey: append(bytes.Repeat([]byte{0x30}, 16), 0x05, 0x06, 0x07, 0x08),
 			},
 		},
 	}

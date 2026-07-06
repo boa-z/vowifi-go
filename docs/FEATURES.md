@@ -220,7 +220,8 @@ protocol layers needed by VoHive:
   tables before TUN default routes are applied
 - Linux kernel XFRM/IPsec helpers that install ESP tunnel states, outbound/
   inbound/forward policies, optional marks, reqids, and XFRM interfaces from
-  IKEv2 CHILD_SA key material with rollback and cleanup support
+  IKEv2 CHILD_SA key material, including AES-CBC/HMAC and AES-GCM AEAD state
+  arguments, with rollback and cleanup support
 - SRTP/SRTCP media helpers and RTP relay transforms for protecting and
   unprotecting RTP/RTCP packets with AES-CM/HMAC-SHA1 and AEAD-AES-GCM
   profiles, independent client/IMS key material, replay protection, and

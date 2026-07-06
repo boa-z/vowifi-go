@@ -17,6 +17,12 @@ import (
 
 var ErrInvalidXFRMConfig = errors.New("invalid swu xfrm config")
 
+const (
+	xfrmAeadAESGCMRFC4106 = "rfc4106(gcm(aes))"
+	xfrmAESGCMSaltLength  = 4
+	xfrmAESGCMICVBits     = 128
+)
+
 type XFRMInterfaceConfig struct {
 	Name           string
 	OuterDev       string
@@ -349,22 +355,34 @@ func validateChildSAForXFRM(child ikev2.ChildSAResult) error {
 	if _, err := xfrmSPI(child.LocalSPI); err != nil {
 		return fmt.Errorf("%w: local spi: %v", ErrInvalidXFRMConfig, err)
 	}
-	if child.Keys.Profile.EncryptionID != ikev2.ENCR_AES_CBC {
+	switch child.Keys.Profile.EncryptionID {
+	case ikev2.ENCR_AES_CBC:
+		if _, _, err := xfrmAuthAlgorithm(child.Keys.Profile.IntegrityID); err != nil {
+			return err
+		}
+		if err := validateXFRMCBCKeys(child.Keys.Profile, child.Keys.Outbound, "outbound"); err != nil {
+			return err
+		}
+		if err := validateXFRMCBCKeys(child.Keys.Profile, child.Keys.Inbound, "inbound"); err != nil {
+			return err
+		}
+	case ikev2.ENCR_AES_GCM_16:
+		if child.Keys.Profile.IntegrityID != 0 || child.Keys.Profile.IntegrityKeyLength != 0 {
+			return fmt.Errorf("%w: AES-GCM ESP must not include integrity transform", ErrInvalidXFRMConfig)
+		}
+		if err := validateXFRMAEADKeys(child.Keys.Profile, child.Keys.Outbound, "outbound"); err != nil {
+			return err
+		}
+		if err := validateXFRMAEADKeys(child.Keys.Profile, child.Keys.Inbound, "inbound"); err != nil {
+			return err
+		}
+	default:
 		return fmt.Errorf("%w: unsupported ESP encryption %d", ErrInvalidXFRMConfig, child.Keys.Profile.EncryptionID)
-	}
-	if _, _, err := xfrmAuthAlgorithm(child.Keys.Profile.IntegrityID); err != nil {
-		return err
-	}
-	if err := validateXFRMKeys(child.Keys.Profile, child.Keys.Outbound, "outbound"); err != nil {
-		return err
-	}
-	if err := validateXFRMKeys(child.Keys.Profile, child.Keys.Inbound, "inbound"); err != nil {
-		return err
 	}
 	return nil
 }
 
-func validateXFRMKeys(profile ikev2.ESPKeyProfile, keys ikev2.ESPKeys, direction string) error {
+func validateXFRMCBCKeys(profile ikev2.ESPKeyProfile, keys ikev2.ESPKeys, direction string) error {
 	if len(keys.EncryptionKey) != 16 && len(keys.EncryptionKey) != 24 && len(keys.EncryptionKey) != 32 {
 		return fmt.Errorf("%w: %s AES key length %d", ErrInvalidXFRMConfig, direction, len(keys.EncryptionKey))
 	}
@@ -380,9 +398,21 @@ func validateXFRMKeys(profile ikev2.ESPKeyProfile, keys ikev2.ESPKeys, direction
 	return nil
 }
 
+func validateXFRMAEADKeys(profile ikev2.ESPKeyProfile, keys ikev2.ESPKeys, direction string) error {
+	if !validXFRMAESGCMKeyLength(len(keys.EncryptionKey)) {
+		return fmt.Errorf("%w: %s AES-GCM key length %d", ErrInvalidXFRMConfig, direction, len(keys.EncryptionKey))
+	}
+	if profile.EncryptionKeyLength > 0 && len(keys.EncryptionKey) != profile.EncryptionKeyLength {
+		return fmt.Errorf("%w: %s encryption key length %d != %d", ErrInvalidXFRMConfig, direction, len(keys.EncryptionKey), profile.EncryptionKeyLength)
+	}
+	if len(keys.IntegrityKey) != 0 {
+		return fmt.Errorf("%w: %s AES-GCM integrity key must be empty", ErrInvalidXFRMConfig, direction)
+	}
+	return nil
+}
+
 func xfrmStateAddArgs(params kernelXFRMParams, outbound bool) []string {
 	src, dst, spi, keys := xfrmDirection(params, outbound)
-	authAlg, truncBits, _ := xfrmAuthAlgorithm(params.child.Keys.Profile.IntegrityID)
 	args := []string{
 		"xfrm", "state", "add",
 		"src", src,
@@ -391,12 +421,24 @@ func xfrmStateAddArgs(params kernelXFRMParams, outbound bool) []string {
 		"spi", spi,
 		"reqid", params.reqID,
 		"mode", "tunnel",
-		"auth-trunc", authAlg, xfrmHexKey(keys.IntegrityKey), strconv.Itoa(truncBits),
-		"enc", "cbc(aes)", xfrmHexKey(keys.EncryptionKey),
 	}
+	args = append(args, xfrmStateCryptoArgs(params.child.Keys.Profile, keys)...)
 	args = appendXFRMCommonSelectors(args, params)
 	args = appendXFRMNATTraversal(args, params, outbound)
 	return args
+}
+
+func xfrmStateCryptoArgs(profile ikev2.ESPKeyProfile, keys ikev2.ESPKeys) []string {
+	switch profile.EncryptionID {
+	case ikev2.ENCR_AES_GCM_16:
+		return []string{"aead", xfrmAeadAESGCMRFC4106, xfrmHexKey(keys.EncryptionKey), strconv.Itoa(xfrmAESGCMICVBits)}
+	default:
+		authAlg, truncBits, _ := xfrmAuthAlgorithm(profile.IntegrityID)
+		return []string{
+			"auth-trunc", authAlg, xfrmHexKey(keys.IntegrityKey), strconv.Itoa(truncBits),
+			"enc", "cbc(aes)", xfrmHexKey(keys.EncryptionKey),
+		}
+	}
 }
 
 func xfrmStateDelArgs(params kernelXFRMParams, outbound bool) []string {
@@ -498,6 +540,15 @@ func xfrmAuthAlgorithm(integrity uint16) (name string, truncBits int, err error)
 		return "hmac(sha256)", 128, nil
 	default:
 		return "", 0, fmt.Errorf("%w: unsupported ESP integrity %d", ErrInvalidXFRMConfig, integrity)
+	}
+}
+
+func validXFRMAESGCMKeyLength(n int) bool {
+	switch n {
+	case 16 + xfrmAESGCMSaltLength, 24 + xfrmAESGCMSaltLength, 32 + xfrmAESGCMSaltLength:
+		return true
+	default:
+		return false
 	}
 }
 
