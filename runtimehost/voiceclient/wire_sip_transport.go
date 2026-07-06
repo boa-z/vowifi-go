@@ -58,9 +58,20 @@ func (t WireSIPTransport) roundTripRequest(ctx context.Context, msg SIPRequestMe
 		timeout = 5 * time.Second
 	}
 	var lastErr error
-	for idx, target := range targets {
+	redirects := 0
+	for idx := 0; idx < len(targets); idx++ {
+		target := targets[idx]
 		resp, err := t.roundTripTarget(ctx, network, target, timeout, msg, onProvisional)
 		if err == nil {
+			if !strings.EqualFold(strings.TrimSpace(msg.Method), "INVITE") &&
+				redirects < maxSIPRedirectTargets && sipRedirectStatus(resp.StatusCode) {
+				if nextTargets, nextIndex, ok := sipTargetsWithRedirects(targets, idx, sipRedirectTargets(resp)); ok {
+					targets = nextTargets
+					idx = nextIndex - 1
+					redirects++
+					continue
+				}
+			}
 			if sipDialogTargetFailoverStatus(resp.StatusCode) && idx+1 < len(targets) && ctx.Err() == nil {
 				continue
 			}

@@ -451,6 +451,133 @@ func TestWireSIPFlowDialogFailsOverRecoverableResponse(t *testing.T) {
 	}
 }
 
+func TestWireSIPFlowRegisterFollowsRedirectContactTarget(t *testing.T) {
+	first, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(first) error = %v", err)
+	}
+	defer first.Close()
+	second, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(second) error = %v", err)
+	}
+	defer second.Close()
+
+	firstSeen := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 65535)
+		_ = first.SetReadDeadline(time.Now().Add(time.Second))
+		n, addr, err := first.ReadFrom(buf)
+		if err != nil {
+			firstSeen <- "read error: " + err.Error()
+			return
+		}
+		firstSeen <- string(append([]byte(nil), buf[:n]...))
+		_, _ = first.WriteTo([]byte("SIP/2.0 302 Moved Temporarily\r\nContact: <sip:pcscf@"+second.LocalAddr().String()+">\r\nContent-Length: 0\r\n\r\n"), addr)
+	}()
+	secondSeen := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 65535)
+		_ = second.SetReadDeadline(time.Now().Add(time.Second))
+		n, addr, err := second.ReadFrom(buf)
+		if err != nil {
+			secondSeen <- "read error: " + err.Error()
+			return
+		}
+		secondSeen <- string(append([]byte(nil), buf[:n]...))
+		_, _ = second.WriteTo([]byte("SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"), addr)
+	}()
+
+	flow := &WireSIPFlow{Network: "udp", ServerAddr: first.LocalAddr().String(), Timeout: time.Second}
+	defer flow.Close()
+	resp, err := flow.RoundTripRegister(context.Background(), RegisterMessage{
+		URI: "sip:ims.example",
+		Headers: map[string]string{
+			"To":           "<sip:user@example>",
+			"From":         "<sip:user@example>;tag=t",
+			"Contact":      "<sip:user@192.0.2.10:5060>",
+			"Call-ID":      "flow-register-redirect",
+			"CSeq":         "1 REGISTER",
+			"Max-Forwards": "70",
+		},
+	})
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("RoundTripRegister() response=%+v err=%v", resp, err)
+	}
+	if wire := <-firstSeen; !strings.Contains(wire, "REGISTER sip:ims.example") {
+		t.Fatalf("first target wire=%q", wire)
+	}
+	if wire := <-secondSeen; !strings.Contains(wire, "REGISTER sip:ims.example") {
+		t.Fatalf("redirect target wire=%q", wire)
+	}
+	if flow.target != second.LocalAddr().String() {
+		t.Fatalf("flow target=%q, want redirect target %q", flow.target, second.LocalAddr().String())
+	}
+}
+
+func TestWireSIPFlowDialogFollowsRedirectContactTarget(t *testing.T) {
+	first, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(first) error = %v", err)
+	}
+	defer first.Close()
+	second, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(second) error = %v", err)
+	}
+	defer second.Close()
+
+	firstSeen := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 65535)
+		_ = first.SetReadDeadline(time.Now().Add(time.Second))
+		n, addr, err := first.ReadFrom(buf)
+		if err != nil {
+			firstSeen <- "read error: " + err.Error()
+			return
+		}
+		firstSeen <- string(append([]byte(nil), buf[:n]...))
+		_, _ = first.WriteTo([]byte("SIP/2.0 302 Moved Temporarily\r\nContact: <sip:pcscf@"+second.LocalAddr().String()+";transport=udp>\r\nContent-Length: 0\r\n\r\n"), addr)
+	}()
+	secondSeen := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 65535)
+		_ = second.SetReadDeadline(time.Now().Add(time.Second))
+		n, addr, err := second.ReadFrom(buf)
+		if err != nil {
+			secondSeen <- "read error: " + err.Error()
+			return
+		}
+		secondSeen <- string(append([]byte(nil), buf[:n]...))
+		_, _ = second.WriteTo([]byte("SIP/2.0 202 Accepted\r\nContent-Length: 0\r\n\r\n"), addr)
+	}()
+
+	flow := &WireSIPFlow{Network: "udp", ServerAddr: first.LocalAddr().String(), Timeout: time.Second}
+	defer flow.Close()
+	resp, err := flow.RoundTripRequest(context.Background(), SIPRequestMessage{
+		Method: "MESSAGE",
+		URI:    "sip:+18005551212@example",
+		Headers: map[string]string{
+			"To":           "<sip:+18005551212@example>",
+			"From":         "<sip:user@example>;tag=sms",
+			"Contact":      "<sip:user@192.0.2.10:5060>",
+			"Call-ID":      "flow-dialog-redirect",
+			"CSeq":         "1 MESSAGE",
+			"Max-Forwards": "70",
+		},
+		Body: []byte("hello"),
+	})
+	if err != nil || resp.StatusCode != 202 {
+		t.Fatalf("RoundTripRequest() response=%+v err=%v", resp, err)
+	}
+	if wire := <-firstSeen; !strings.Contains(wire, "MESSAGE sip:+18005551212@example") {
+		t.Fatalf("first target wire=%q", wire)
+	}
+	if wire := <-secondSeen; !strings.Contains(wire, "MESSAGE sip:+18005551212@example") {
+		t.Fatalf("redirect target wire=%q", wire)
+	}
+}
+
 func TestWireSIPFlowWaitsForNonInviteFinalAfterProvisional(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

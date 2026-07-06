@@ -211,6 +211,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	attempts := 0
+	redirects := 0
 	shouldRetry := func(err error) bool {
 		if ctx.Err() != nil || !isSIPRetryableTransportError(err) {
 			return false
@@ -231,6 +232,18 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 		}
 		f.closeConnLocked()
 		return f.advanceTargetLocked()
+	}
+	shouldRedirectResponse := func(resp SIPResponse) bool {
+		if ctx.Err() != nil || redirects >= maxSIPRedirectTargets || !sipRedirectStatus(resp.StatusCode) ||
+			strings.EqualFold(strings.TrimSpace(msg.Method), "INVITE") {
+			return false
+		}
+		if !f.redirectToResponseTargetsLocked(resp) {
+			return false
+		}
+		redirects++
+		f.closeConnLocked()
+		return true
 	}
 	for {
 		conn, network, timeout, err := f.ensureConnLocked(ctx, msg)
@@ -278,6 +291,12 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 				}
 				continue
 			}
+			if shouldRedirectResponse(resp) {
+				continue
+			}
+			if shouldRetryResponse(resp) {
+				continue
+			}
 			return resp, nil
 		}
 		resp, err := f.readUDPResponseLocked(ctx, conn, timeout, wire, attempt, onProvisional)
@@ -289,6 +308,9 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 			if !shouldRetry(err) {
 				return SIPResponse{}, err
 			}
+			continue
+		}
+		if shouldRedirectResponse(resp) {
 			continue
 		}
 		if shouldRetryResponse(resp) {
@@ -402,8 +424,11 @@ func (f *WireSIPFlow) ensureConnLocked(ctx context.Context, msg SIPRequestMessag
 
 func (f *WireSIPFlow) ensureTargetsLocked(ctx context.Context, network, uri string) ([]string, error) {
 	if target := strings.TrimSpace(f.ServerAddr); target != "" {
-		if len(f.targets) != 1 || f.targets[0] != target {
+		if len(f.targets) == 0 || f.targets[0] != target {
 			f.targets = []string{target}
+			f.targetIndex = 0
+		}
+		if f.targetIndex < 0 || f.targetIndex >= len(f.targets) {
 			f.targetIndex = 0
 		}
 		return f.targets, nil
@@ -420,6 +445,16 @@ func (f *WireSIPFlow) ensureTargetsLocked(ctx context.Context, network, uri stri
 		f.targetIndex = 0
 	}
 	return f.targets, nil
+}
+
+func (f *WireSIPFlow) redirectToResponseTargetsLocked(resp SIPResponse) bool {
+	targets, nextIndex, ok := sipTargetsWithRedirects(f.targets, f.targetIndex, sipRedirectTargets(resp))
+	if !ok {
+		return false
+	}
+	f.targets = targets
+	f.targetIndex = nextIndex
+	return true
 }
 
 func (f *WireSIPFlow) advanceTargetLocked() bool {

@@ -45,7 +45,9 @@ func (t WireRegisterTransport) RoundTripRegister(ctx context.Context, msg Regist
 		timeout = 5 * time.Second
 	}
 	var lastErr error
-	for idx, target := range targets {
+	redirects := 0
+	for idx := 0; idx < len(targets); idx++ {
+		target := targets[idx]
 		var resp RegisterResponse
 		var err error
 		switch network {
@@ -57,6 +59,14 @@ func (t WireRegisterTransport) RoundTripRegister(ctx context.Context, msg Regist
 			return RegisterResponse{}, fmt.Errorf("unsupported SIP register network %q", network)
 		}
 		if err == nil {
+			if redirects < maxSIPRedirectTargets && sipRedirectStatus(resp.StatusCode) {
+				if nextTargets, nextIndex, ok := sipTargetsWithRedirects(targets, idx, sipRedirectTargets(resp)); ok {
+					targets = nextTargets
+					idx = nextIndex - 1
+					redirects++
+					continue
+				}
+			}
 			if sipRegisterTargetFailoverStatus(resp.StatusCode) && idx+1 < len(targets) {
 				continue
 			}
@@ -418,6 +428,59 @@ func sipDialogTargetFailoverStatus(code int) bool {
 	default:
 		return code >= 500 && code < 600
 	}
+}
+
+const maxSIPRedirectTargets = 4
+
+func sipRedirectStatus(code int) bool {
+	return code >= 300 && code < 400
+}
+
+func sipRedirectTargets(resp SIPResponse) []string {
+	var targets []string
+	for _, contact := range headerListValues(resp.Headers, "Contact") {
+		uri := extractAddressURI(contact)
+		if uri == "" || uri == "*" {
+			continue
+		}
+		target, err := sipURIAddr(uri)
+		if err != nil {
+			continue
+		}
+		targets = appendSIPTargets(targets, target)
+	}
+	return targets
+}
+
+func sipTargetsWithRedirects(targets []string, currentIndex int, redirects []string) ([]string, int, bool) {
+	if len(redirects) == 0 {
+		return targets, currentIndex, false
+	}
+	if currentIndex < 0 {
+		currentIndex = 0
+	}
+	if currentIndex >= len(targets) {
+		currentIndex = len(targets) - 1
+	}
+	if currentIndex < 0 {
+		targets = appendSIPTargets(nil, redirects...)
+		return targets, 0, len(targets) > 0
+	}
+	out := appendSIPTargets(nil, targets[:currentIndex+1]...)
+	out = appendSIPTargets(out, redirects...)
+	out = appendSIPTargets(out, targets[currentIndex+1:]...)
+	for _, redirect := range redirects {
+		redirect = strings.TrimSpace(redirect)
+		if redirect == "" {
+			continue
+		}
+		for idx, target := range out {
+			if target == redirect && idx != currentIndex {
+				return out, idx, true
+			}
+		}
+	}
+	return out, currentIndex, false
 }
 
 func SIPRetryAfterDelay(headers map[string][]string) time.Duration {
