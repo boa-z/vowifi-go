@@ -3,6 +3,7 @@ package carrier
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -132,6 +133,44 @@ func TestLoadCarrierOverridesNormalizesShortKeyAndNetworkPolicy(t *testing.T) {
 		t.Fatalf("Network=%+v, want override plus fallback defaults", cfg.Network)
 	}
 	ClearCarrierOverrides()
+}
+
+func TestLoadCarrierOverridesNormalizesPCSCFCandidates(t *testing.T) {
+	ClearCarrierOverrides()
+	t.Cleanup(ClearCarrierOverrides)
+
+	path := filepath.Join(t.TempDir(), "carriers.json")
+	if err := os.WriteFile(path, []byte(`{
+		"001010": {
+			"mcc": "001",
+			"mnc": "010",
+			"network": {
+				"pcscf_fqdn": " PCSCF-A.EXAMPLE.TEST. ",
+				"pcscf_fqdns": ["pcscf-b.example.test.", "pcscf-a.example.test"],
+				"pcscf_fqdn_list": "pcscf-c.example.test, pcscf-b.example.test",
+				"pcscf": "pcscf-d.example.test"
+			}
+		}
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCarrierOverrides(path); err != nil {
+		t.Fatalf("LoadCarrierOverrides() error = %v", err)
+	}
+	cfg := ResolveEffectiveCarrierConfig(EffectiveCarrierConfigInput{MCC: "001", MNC: "010"})
+	want := []string{
+		"pcscf-a.example.test",
+		"pcscf-b.example.test",
+		"pcscf-c.example.test",
+		"pcscf-d.example.test",
+	}
+	if cfg.Network.PCSCFFQDN != want[0] || !reflect.DeepEqual(cfg.Network.PCSCFFQDNs, want) {
+		t.Fatalf("P-CSCF primary/list=%q/%+v, want %+v", cfg.Network.PCSCFFQDN, cfg.Network.PCSCFFQDNs, want)
+	}
+	got := PCSCFCandidates(NetworkConfig{PCSCFFQDNs: []string{" PCSCF-X.EXAMPLE.TEST. ", "pcscf-x.example.test", "pcscf-y.example.test"}})
+	if !reflect.DeepEqual(got, []string{"pcscf-x.example.test", "pcscf-y.example.test"}) {
+		t.Fatalf("PCSCFCandidates()=%+v", got)
+	}
 }
 
 func TestDeriveIdentitiesUsePrivateIdentityRealm(t *testing.T) {

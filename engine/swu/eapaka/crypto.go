@@ -49,6 +49,17 @@ type Keys struct {
 	IKPrime []byte
 }
 
+type ChallengeResponseResult struct {
+	Response    Packet
+	Keys        Keys
+	AKA         sim.AKAResult
+	RAND        []byte
+	AUTN        []byte
+	SyncFailure bool
+	AuthFailure bool
+	BiddingDown bool
+}
+
 func DeriveKeys(identity string, aka sim.AKAResult) (Keys, error) {
 	if err := validateCKIK(aka); err != nil {
 		return Keys{}, err
@@ -188,6 +199,57 @@ func BuildChallengeResponseWithCheckcode(identity string, request Packet, aka si
 	}
 	response.Attributes[len(response.Attributes)-1] = MACAttribute(mac)
 	return response, keys, nil
+}
+
+func BuildChallengeResponseFromProvider(identity string, request Packet, provider sim.AKAProvider, identityPackets [][]byte) (ChallengeResponseResult, error) {
+	if provider == nil {
+		return ChallengeResponseResult{}, fmt.Errorf("%w: AKA provider is nil", ErrInvalidAKAChallenge)
+	}
+	rand16, autn16, err := ChallengeRANDAndAUTN(request)
+	if err != nil {
+		return ChallengeResponseResult{}, err
+	}
+	aka, err := provider.CalculateAKA(rand16, autn16)
+	result := ChallengeResponseResult{
+		AKA:  cloneAKAResult(aka),
+		RAND: append([]byte(nil), rand16...),
+		AUTN: append([]byte(nil), autn16...),
+	}
+	if err != nil {
+		response, handled, failureErr := BuildAKAFailureResponse(request, aka, err)
+		if failureErr != nil {
+			return ChallengeResponseResult{}, failureErr
+		}
+		if !handled {
+			return ChallengeResponseResult{}, err
+		}
+		result.Response = response
+		result.SyncFailure = errors.Is(err, sim.ErrSyncFailure)
+		result.AuthFailure = errors.Is(err, sim.ErrAuthFailure)
+		return result, nil
+	}
+
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ChallengeResponseResult{}, fmt.Errorf("%w: identity is empty", ErrInvalidKeyMaterial)
+	}
+	response, keys, err := BuildChallengeResponseWithCheckcode(identity, request, aka, identityPackets)
+	if errors.Is(err, ErrBiddingDown) {
+		response, rejectErr := BuildAuthenticationRejectResponse(request)
+		if rejectErr != nil {
+			return ChallengeResponseResult{}, rejectErr
+		}
+		result.Response = response
+		result.AuthFailure = true
+		result.BiddingDown = true
+		return result, nil
+	}
+	if err != nil {
+		return ChallengeResponseResult{}, err
+	}
+	result.Response = response
+	result.Keys = keys
+	return result, nil
 }
 
 func verifyChallengeCheckcode(request Packet, identityPackets [][]byte) (bool, error) {
@@ -1068,6 +1130,15 @@ func cloneAttributes(attrs []Attribute) []Attribute {
 		out[i] = Attribute{Type: attr.Type, Data: append([]byte(nil), attr.Data...)}
 	}
 	return out
+}
+
+func cloneAKAResult(aka sim.AKAResult) sim.AKAResult {
+	return sim.AKAResult{
+		RES:  append([]byte(nil), aka.RES...),
+		CK:   append([]byte(nil), aka.CK...),
+		IK:   append([]byte(nil), aka.IK...),
+		AUTS: append([]byte(nil), aka.AUTS...),
+	}
 }
 
 func validateReauthenticationMethod(eapType uint8, keys Keys) error {

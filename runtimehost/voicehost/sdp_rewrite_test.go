@@ -320,6 +320,37 @@ func TestBuildSDPAnswerWithOptionsZeroMatchesDefault(t *testing.T) {
 	}
 }
 
+func TestParseSDPAudioDirectionUsesMediaOverride(t *testing.T) {
+	info, err := ParseSDP([]byte("v=0\r\n" +
+		"c=IN IP4 203.0.113.8\r\n" +
+		"a=sendonly\r\n" +
+		"m=audio 49170 RTP/AVP 0 101\r\n" +
+		"a=recvonly\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"m=video 9 RTP/AVP 99\r\n" +
+		"a=inactive\r\n"))
+	if err != nil {
+		t.Fatalf("ParseSDP() error = %v", err)
+	}
+	if info.Direction != "recvonly" {
+		t.Fatalf("direction=%q, want recvonly", info.Direction)
+	}
+}
+
+func TestParseSDPAudioDirectionUsesSessionFallback(t *testing.T) {
+	info, err := ParseSDP([]byte("v=0\r\n" +
+		"c=IN IP4 203.0.113.8\r\n" +
+		"a=SendOnly\r\n" +
+		"m=audio 49170 RTP/AVP 0 101\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\n"))
+	if err != nil {
+		t.Fatalf("ParseSDP() error = %v", err)
+	}
+	if info.Direction != "sendonly" {
+		t.Fatalf("direction=%q, want sendonly", info.Direction)
+	}
+}
+
 func TestParseSDPKeepsSeparateRTCPAddress(t *testing.T) {
 	info, err := ParseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 4002 RTP/AVP 0\r\na=rtcp:5005 IN IP4 198.51.100.20\r\n"))
 	if err != nil {
@@ -366,5 +397,64 @@ func TestRewriteSDPMediaDirectionRejectsInvalidDirection(t *testing.T) {
 	_, err := RewriteSDPMediaDirection([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 4002 RTP/AVP 0\r\n"), "hold")
 	if !errors.Is(err, ErrInvalidSDPDirection) {
 		t.Fatalf("RewriteSDPMediaDirection() err=%v, want ErrInvalidSDPDirection", err)
+	}
+}
+
+func TestRewriteSDPMediaDirectionScopesToAudio(t *testing.T) {
+	raw := []byte("v=0\r\n" +
+		"c=IN IP4 192.0.2.10\r\n" +
+		"a=sendrecv\r\n" +
+		"m=audio 4002 RTP/AVP 0 101\r\n" +
+		"a=sendrecv\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"m=video 9 RTP/AVP 99\r\n" +
+		"a=sendonly\r\n")
+	got, err := RewriteSDPMediaDirection(raw, "inactive")
+	if err != nil {
+		t.Fatalf("RewriteSDPMediaDirection() error = %v", err)
+	}
+	text := string(got)
+	for _, want := range []string{
+		"a=sendrecv\r\nm=audio 4002 RTP/AVP 0 101\r\na=inactive\r\n",
+		"m=video 9 RTP/AVP 99\r\na=sendonly\r\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("rewritten SDP missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Count(text, "a=inactive\r\n") != 1 {
+		t.Fatalf("rewritten SDP should contain one audio direction:\n%s", text)
+	}
+}
+
+func TestSelectSDPAnswerDirectionNegotiatesHoldResumeAndEarlyMedia(t *testing.T) {
+	tests := []struct {
+		name  string
+		offer string
+		local string
+		want  string
+	}{
+		{name: "default resume", offer: "", local: "", want: "sendrecv"},
+		{name: "early media from offerer", offer: "sendonly", local: "sendrecv", want: "recvonly"},
+		{name: "answerer sends to recvonly offer", offer: "recvonly", local: "sendrecv", want: "sendonly"},
+		{name: "incompatible one-way preferences", offer: "sendonly", local: "sendonly", want: "inactive"},
+		{name: "remote hold", offer: "inactive", local: "sendrecv", want: "inactive"},
+		{name: "local hold", offer: "sendrecv", local: "inactive", want: "inactive"},
+	}
+	for _, tt := range tests {
+		got, err := SelectSDPAnswerDirection(tt.offer, tt.local)
+		if err != nil {
+			t.Fatalf("%s: SelectSDPAnswerDirection() error = %v", tt.name, err)
+		}
+		if got != tt.want {
+			t.Fatalf("%s: direction=%q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestSelectSDPAnswerDirectionRejectsInvalidDirection(t *testing.T) {
+	_, err := SelectSDPAnswerDirection("hold", "sendrecv")
+	if !errors.Is(err, ErrInvalidSDPDirection) {
+		t.Fatalf("SelectSDPAnswerDirection() err=%v, want ErrInvalidSDPDirection", err)
 	}
 }

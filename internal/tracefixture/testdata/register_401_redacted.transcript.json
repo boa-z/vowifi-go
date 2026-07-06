@@ -1,0 +1,30 @@
+{
+  "schema": "vowifi-go.tracefixture.transcript.v1",
+  "name": "ims-register-401-redacted",
+  "events": [
+    {
+      "label": "initial-register",
+      "direction": "outbound",
+      "transport": "udp",
+      "wire": "REGISTER sip:ims.example.invalid SIP/2.0\r\nVia: SIP/2.0/UDP ue.redacted.invalid:5060;branch=z9hG4bKfixture1\r\nFrom: <sip:redacted-user-1@ims.example.invalid>;tag=fixture1\r\nTo: <sip:redacted-user-1@ims.example.invalid>\r\nCall-ID: fixture-call\r\nCSeq: 1 REGISTER\r\nContact: <sip:redacted-user-1@ue.redacted.invalid:5060>\r\nContent-Length: 0\r\n\r\n"
+    },
+    {
+      "label": "register-challenge",
+      "direction": "inbound",
+      "transport": "udp",
+      "wire": "SIP/2.0 401 Unauthorized\r\nVia: SIP/2.0/UDP ue.redacted.invalid:5060;branch=z9hG4bKfixture1\r\nFrom: <sip:redacted-user-1@ims.example.invalid>;tag=fixture1\r\nTo: <sip:redacted-user-1@ims.example.invalid>;tag=fixture2\r\nCall-ID: fixture-call\r\nCSeq: 1 REGISTER\r\nWWW-Authenticate: <redacted>\r\nSecurity-Server: <redacted>\r\nContent-Length: 0\r\n\r\n"
+    },
+    {
+      "label": "authenticated-register",
+      "direction": "outbound",
+      "transport": "udp",
+      "wire": "REGISTER sip:ims.example.invalid SIP/2.0\r\nVia: SIP/2.0/UDP ue.redacted.invalid:5060;branch=z9hG4bKfixture3\r\nFrom: <sip:redacted-user-1@ims.example.invalid>;tag=fixture1\r\nTo: <sip:redacted-user-1@ims.example.invalid>\r\nCall-ID: fixture-call\r\nCSeq: 2 REGISTER\r\nContact: <sip:redacted-user-1@ue.redacted.invalid:5060>\r\nAuthorization: <redacted>\r\nSecurity-Verify: <redacted>\r\nContent-Length: 0\r\n\r\n"
+    },
+    {
+      "label": "register-ok",
+      "direction": "inbound",
+      "transport": "udp",
+      "wire": "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP ue.redacted.invalid:5060;branch=z9hG4bKfixture3\r\nFrom: <sip:redacted-user-1@ims.example.invalid>;tag=fixture1\r\nTo: <sip:redacted-user-1@ims.example.invalid>;tag=fixture4\r\nCall-ID: fixture-call\r\nCSeq: 2 REGISTER\r\nP-Associated-URI: <sip:redacted-user-1@ims.example.invalid>\r\nContact: <sip:redacted-user-1@ue.redacted.invalid:5060>\r\nContent-Length: 0\r\n\r\n"
+    }
+  ]
+}

@@ -110,6 +110,67 @@ func TestBuildEmergencyInviteRequestUsesURNRoutesHeadersAndContact(t *testing.T)
 	}
 }
 
+func TestBuildEmergencyInviteRequestEmbedsPIDFLOMultipartBody(t *testing.T) {
+	pidfLO, err := BuildEmergencyPIDFLO(EmergencyPIDFLOConfig{
+		Entity: "pres:device@example.test",
+		Address: EmergencyAddress{
+			Latitude:  "47.6205",
+			Longitude: "-122.3493",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildEmergencyPIDFLO() error = %v", err)
+	}
+	info := BuildEmergencySIPRequestInfo(EmergencySIPHeaderConfig{
+		ServiceURN:         "fire",
+		AccessNetworkInfo:  EmergencyAccessNetworkInfo{Raw: "IEEE-802.11"},
+		PIDFLOContentID:    "location-inline",
+		PIDFLOBody:         pidfLO,
+		GeolocationRouting: true,
+	})
+
+	msg, err := BuildEmergencyInviteRequest(voiceclient.DialogRequestConfig{
+		Profile: voiceclient.IMSProfile{
+			IMPI:      "001010123456789@ims.example",
+			IMPU:      "sip:001010123456789@ims.example",
+			Domain:    "ims.example",
+			UserAgent: "vowifi-go-test",
+		},
+		Registration: voiceclient.RegistrationBinding{
+			ContactURI:     "sip:001010123456789@192.0.2.10:5060",
+			PublicIdentity: "sip:001010123456789@ims.example",
+		},
+		CallID:   "emergency-call-pidf",
+		LocalTag: "local",
+	}, info, []byte("v=0\r\n"))
+	if err != nil {
+		t.Fatalf("BuildEmergencyInviteRequest() error = %v", err)
+	}
+	if msg.Headers["Geolocation"] != "<cid:location-inline>;inserted-by=endpoint" ||
+		msg.Headers["Geolocation-Routing"] != GeolocationRoutingYes {
+		t.Fatalf("geolocation headers=%+v", msg.Headers)
+	}
+	if !strings.HasPrefix(msg.Headers["Content-Type"], EmergencyMultipartRelatedContentType+";") ||
+		!strings.Contains(msg.Headers["Content-Type"], `type="application/sdp"`) ||
+		!strings.Contains(msg.Headers["Content-Type"], `start="<sdp>"`) {
+		t.Fatalf("Content-Type=%q", msg.Headers["Content-Type"])
+	}
+	body := string(msg.Body)
+	for _, want := range []string{
+		"Content-Type: application/sdp\r\nContent-ID: <sdp>",
+		"Content-Type: application/pidf+xml\r\nContent-ID: <location-inline>",
+		"<gml:pos>47.6205 -122.3493</gml:pos>",
+		"--e911-pidf-lo--\r\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("multipart body missing %q:\n%s", want, body)
+		}
+	}
+	if msg.Headers["Contact"] != "<sip:001010123456789@192.0.2.10:5060;sos>" {
+		t.Fatalf("Contact=%q", msg.Headers["Contact"])
+	}
+}
+
 func TestClassifyEmergencySIPFailureMapsLocationAlternativeAndRecovery(t *testing.T) {
 	location := ClassifyEmergencySIPFailure(voiceclient.SIPResponse{
 		StatusCode: 424,

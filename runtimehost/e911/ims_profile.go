@@ -62,7 +62,18 @@ func BuildEmergencyInviteRequest(cfg voiceclient.DialogRequestConfig, info Emerg
 	if len(info.RouteSet) > 0 {
 		cfg.RouteSet = copyStringSlice(info.RouteSet)
 	}
-	msg, err := voiceclient.BuildInviteRequest(cfg, sdp)
+	body := sdp
+	contentType := ""
+	if len(info.PIDFLOBody) > 0 {
+		var err error
+		contentType, body, err = BuildEmergencyPIDFLOMultipartBody(sdp, info.PIDFLOBody, EmergencyMultipartRelatedConfig{
+			PIDFLOContentID: info.PIDFLOContentID,
+		})
+		if err != nil {
+			return voiceclient.SIPRequestMessage{}, err
+		}
+	}
+	msg, err := voiceclient.BuildInviteRequest(cfg, body)
 	if err != nil {
 		return voiceclient.SIPRequestMessage{}, err
 	}
@@ -75,6 +86,14 @@ func BuildEmergencyInviteRequest(cfg voiceclient.DialogRequestConfig, info Emerg
 		}
 		msg.Headers[key] = value
 	}
+	if contentType != "" {
+		msg.Headers["Content-Type"] = contentType
+		if emergencyStringHeaderValue(msg.Headers, "Geolocation") == "" {
+			if contentID := emergencyContentIDForHeader(info.PIDFLOContentID, defaultEmergencyPIDFLOContentID); contentID != "" {
+				msg.Headers["Geolocation"] = formatGeolocationURI("cid:" + contentID)
+			}
+		}
+	}
 	if len(info.RouteSet) > 0 {
 		msg.Headers["Route"] = strings.Join(info.RouteSet, ", ")
 	}
@@ -86,6 +105,15 @@ func BuildEmergencyInviteRequest(cfg voiceclient.DialogRequestConfig, info Emerg
 		msg.Headers["Contact"] = marked
 	}
 	return msg, nil
+}
+
+func emergencyStringHeaderValue(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func MarkEmergencyContactHeader(contact string) (string, error) {

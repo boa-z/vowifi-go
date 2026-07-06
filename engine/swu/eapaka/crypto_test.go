@@ -1039,6 +1039,104 @@ func TestBuildChallengeResponseRejectsMissingRAND(t *testing.T) {
 	}
 }
 
+func TestBuildChallengeResponseFromProviderSuccess(t *testing.T) {
+	identity := "310280233641503@nai.epc.mnc280.mcc310.3gppnetwork.org"
+	aka := sim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44},
+		CK:  bytes.Repeat([]byte{0xc1}, 16),
+		IK:  bytes.Repeat([]byte{0xd2}, 16),
+	}
+	req := signedChallengeRequest(t, identity, aka)
+	var gotRAND, gotAUTN []byte
+	result, err := BuildChallengeResponseFromProvider(identity, req, challengeAKAProviderFunc(func(rand16, autn16 []byte) (sim.AKAResult, error) {
+		gotRAND = append([]byte(nil), rand16...)
+		gotAUTN = append([]byte(nil), autn16...)
+		return aka, nil
+	}), nil)
+	if err != nil {
+		t.Fatalf("BuildChallengeResponseFromProvider() error = %v", err)
+	}
+	if result.SyncFailure || result.AuthFailure || result.BiddingDown {
+		t.Fatalf("unexpected failure flags: %+v", result)
+	}
+	if !bytes.Equal(gotRAND, bytes.Repeat([]byte{0xa1}, 16)) || !bytes.Equal(gotAUTN, bytes.Repeat([]byte{0xb2}, 16)) {
+		t.Fatalf("provider RAND=%x AUTN=%x", gotRAND, gotAUTN)
+	}
+	if !bytes.Equal(result.RAND, gotRAND) || !bytes.Equal(result.AUTN, gotAUTN) {
+		t.Fatalf("result RAND=%x AUTN=%x", result.RAND, result.AUTN)
+	}
+	if !bytes.Equal(result.AKA.RES, aka.RES) || len(result.Keys.KAut) != KeyLengthKAut {
+		t.Fatalf("result AKA=%+v keys=%+v", result.AKA, result.Keys)
+	}
+	raw, err := result.Response.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(response) error = %v", err)
+	}
+	if err := VerifyMAC(result.Keys.KAut, raw, nil); err != nil {
+		t.Fatalf("VerifyMAC(response) error = %v", err)
+	}
+}
+
+func TestBuildChallengeResponseFromProviderSyncFailure(t *testing.T) {
+	identity := "310280233641503@nai.epc.mnc280.mcc310.3gppnetwork.org"
+	aka := sim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44},
+		CK:  bytes.Repeat([]byte{0xc1}, 16),
+		IK:  bytes.Repeat([]byte{0xd2}, 16),
+	}
+	req := signedChallengeRequest(t, identity, aka)
+	wantAUTS := bytes.Repeat([]byte{0xee}, AUTSLength)
+	result, err := BuildChallengeResponseFromProvider(identity, req, challengeAKAProviderFunc(func(rand16, autn16 []byte) (sim.AKAResult, error) {
+		return sim.AKAResult{AUTS: wantAUTS}, sim.ErrSyncFailure
+	}), nil)
+	if err != nil {
+		t.Fatalf("BuildChallengeResponseFromProvider(sync) error = %v", err)
+	}
+	if !result.SyncFailure || result.AuthFailure || result.Response.Subtype != SubtypeSynchronizationFailure {
+		t.Fatalf("sync result=%+v", result)
+	}
+	attr, ok := FindAttribute(result.Response.Attributes, AttributeAUTS)
+	if !ok {
+		t.Fatal("missing AT_AUTS")
+	}
+	auts, err := attr.AUTSValue()
+	if err != nil {
+		t.Fatalf("AUTSValue() error = %v", err)
+	}
+	if !bytes.Equal(auts, wantAUTS) {
+		t.Fatalf("AUTS=%x", auts)
+	}
+}
+
+func TestBuildChallengeResponseFromProviderAuthFailure(t *testing.T) {
+	identity := "310280233641503@nai.epc.mnc280.mcc310.3gppnetwork.org"
+	aka := sim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44},
+		CK:  bytes.Repeat([]byte{0xc1}, 16),
+		IK:  bytes.Repeat([]byte{0xd2}, 16),
+	}
+	req := signedChallengeRequest(t, identity, aka)
+	result, err := BuildChallengeResponseFromProvider(identity, req, challengeAKAProviderFunc(func(rand16, autn16 []byte) (sim.AKAResult, error) {
+		return sim.AKAResult{}, sim.ErrAuthFailure
+	}), nil)
+	if err != nil {
+		t.Fatalf("BuildChallengeResponseFromProvider(auth) error = %v", err)
+	}
+	if result.SyncFailure || !result.AuthFailure || result.Response.Subtype != SubtypeAuthenticationReject {
+		t.Fatalf("auth result=%+v", result)
+	}
+	if len(result.Response.Attributes) != 0 {
+		t.Fatalf("auth reject attributes=%+v", result.Response.Attributes)
+	}
+}
+
+func TestBuildChallengeResponseFromProviderRejectsNilProvider(t *testing.T) {
+	_, err := BuildChallengeResponseFromProvider("identity", Packet{Code: CodeRequest, Type: TypeAKA, Subtype: SubtypeChallenge}, nil, nil)
+	if !errors.Is(err, ErrInvalidAKAChallenge) {
+		t.Fatalf("BuildChallengeResponseFromProvider(nil) err=%v, want ErrInvalidAKAChallenge", err)
+	}
+}
+
 func TestDeriveKeysRejectsInvalidAKAInputLengths(t *testing.T) {
 	valid := sim.AKAResult{
 		RES: []byte{1, 2, 3, 4},
@@ -1272,6 +1370,12 @@ func signedChallengeRequest(t *testing.T, identity string, aka sim.AKAResult) Pa
 	}
 	req.Attributes[len(req.Attributes)-1] = MACAttribute(mac)
 	return req
+}
+
+type challengeAKAProviderFunc func(rand16, autn16 []byte) (sim.AKAResult, error)
+
+func (f challengeAKAProviderFunc) CalculateAKA(rand16, autn16 []byte) (sim.AKAResult, error) {
+	return f(rand16, autn16)
 }
 
 func signedChallengeRequestWithCheckcode(t *testing.T, identity string, aka sim.AKAResult, transcript [][]byte) Packet {

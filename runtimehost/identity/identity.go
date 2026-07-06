@@ -65,6 +65,7 @@ type PreparedSession struct {
 	Profile            Profile
 	EffectiveCarrier   EffectiveCarrier
 	EPDGAddr           string
+	PCSCFFQDNs         []string
 	EPDGSource         string
 	IdentityIMSISource string
 	IdentityIMEISource string
@@ -142,6 +143,7 @@ func PrepareStart(in PrepareStartInput) (PreparedSession, error) {
 			PresetID: effectiveCfg.PresetID,
 		},
 		EPDGAddr:           defaultEPDGWithNetwork(effectiveCfg.Network),
+		PCSCFFQDNs:         carrier.PCSCFCandidates(effectiveCfg.Network),
 		EPDGSource:         "derived",
 		IdentityIMSISource: IMSISourceProfile,
 		IdentityIMEISource: imeiSource,

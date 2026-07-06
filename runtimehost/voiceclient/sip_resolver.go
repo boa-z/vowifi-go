@@ -260,7 +260,8 @@ func (e sipURIEndpoint) addr() string {
 }
 
 func parseSIPURIEndpoint(uri string) (sipURIEndpoint, error) {
-	uri = strings.TrimSpace(uri)
+	original := strings.TrimSpace(uri)
+	uri = extractSIPURIForEndpoint(original)
 	if uri == "" {
 		return sipURIEndpoint{}, errSIPURIEmpty()
 	}
@@ -274,15 +275,14 @@ func parseSIPURIEndpoint(uri string) (sipURIEndpoint, error) {
 	} else {
 		return sipURIEndpoint{}, errUnsupportedSIPURI(uri)
 	}
-	if user, host, ok := strings.Cut(uri, "@"); ok {
-		_ = user
-		uri = host
+	if q := strings.IndexByte(uri, '?'); q >= 0 {
+		uri = uri[:q]
+	}
+	if at := strings.LastIndexByte(uri, '@'); at >= 0 {
+		uri = uri[at+1:]
 	}
 	if semi := strings.IndexByte(uri, ';'); semi >= 0 {
 		uri = uri[:semi]
-	}
-	if q := strings.IndexByte(uri, '?'); q >= 0 {
-		uri = uri[:q]
 	}
 	rawHostPort := strings.TrimSpace(uri)
 	defaultPort := "5060"
@@ -301,12 +301,16 @@ func parseSIPURIEndpoint(uri string) (sipURIEndpoint, error) {
 		if rest := strings.TrimSpace(rawHostPort[end+1:]); strings.HasPrefix(rest, ":") {
 			port = strings.TrimSpace(rest[1:])
 			explicitPort = true
+		} else if rest != "" {
+			return sipURIEndpoint{}, errInvalidSIPURIHost(rawHostPort)
 		}
 	} else if h, p, err := net.SplitHostPort(rawHostPort); err == nil {
 		host = strings.Trim(h, "[]")
 		port = p
 		explicitPort = true
-	} else if idx := strings.LastIndex(rawHostPort, ":"); idx > 0 && !strings.Contains(rawHostPort[idx+1:], ":") {
+	} else if ip := net.ParseIP(rawHostPort); ip != nil {
+		host = ip.String()
+	} else if idx := strings.LastIndex(rawHostPort, ":"); idx > 0 && strings.Count(rawHostPort, ":") == 1 {
 		host = strings.Trim(rawHostPort[:idx], "[] ")
 		port = strings.TrimSpace(rawHostPort[idx+1:])
 		explicitPort = true
@@ -320,6 +324,111 @@ func parseSIPURIEndpoint(uri string) (sipURIEndpoint, error) {
 		port = defaultPort
 	}
 	return sipURIEndpoint{Host: host, Port: port, Secure: secure, ExplicitPort: explicitPort}, nil
+}
+
+func extractSIPURIForEndpoint(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := splitSIPHeaderValues(value)
+	if len(parts) == 0 {
+		parts = []string{value}
+	}
+	var first string
+	for _, part := range parts {
+		uri, sip := sipURIFromHeaderPart(part)
+		if uri == "" {
+			continue
+		}
+		if first == "" {
+			first = uri
+		}
+		if sip {
+			return uri
+		}
+	}
+	return first
+}
+
+func sipURIFromHeaderPart(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if hasSIPURIScheme(value) {
+		return trimSIPURIHeaderTail(value), true
+	}
+	if start := strings.IndexByte(value, '<'); start >= 0 {
+		if end := strings.IndexByte(value[start+1:], '>'); end >= 0 {
+			uri := trimSIPURIHeaderTail(value[start+1 : start+1+end])
+			return uri, hasSIPURIScheme(uri)
+		}
+		uri := trimSIPURIHeaderTail(value[start+1:])
+		return uri, hasSIPURIScheme(uri)
+	}
+	value = strings.Trim(strings.TrimSpace(value), "\"'")
+	if hasSIPURIScheme(value) {
+		return trimSIPURIHeaderTail(value), true
+	}
+	if idx := sipURISchemeIndex(value); idx >= 0 {
+		uri := trimSIPURIHeaderTail(value[idx:])
+		return uri, true
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return "", false
+	}
+	uri := trimSIPURIHeaderTail(fields[0])
+	return uri, hasSIPURIScheme(uri)
+}
+
+func trimSIPURIHeaderTail(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "<>\"'")
+	if end := strings.IndexByte(value, '>'); end >= 0 {
+		value = value[:end]
+	}
+	if fields := strings.Fields(value); len(fields) > 0 {
+		value = fields[0]
+	}
+	return strings.Trim(strings.TrimSpace(value), "<>\"'")
+}
+
+func hasSIPURIScheme(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(lower, "sip:") || strings.HasPrefix(lower, "sips:")
+}
+
+func sipURISchemeIndex(value string) int {
+	lower := strings.ToLower(value)
+	best := -1
+	for _, scheme := range []string{"sips:", "sip:"} {
+		for offset := 0; offset < len(lower); {
+			idx := strings.Index(lower[offset:], scheme)
+			if idx < 0 {
+				break
+			}
+			idx += offset
+			if sipSchemeBoundary(value, idx) && (best < 0 || idx < best) {
+				best = idx
+				break
+			}
+			offset = idx + 1
+		}
+	}
+	return best
+}
+
+func sipSchemeBoundary(value string, idx int) bool {
+	if idx <= 0 {
+		return true
+	}
+	switch value[idx-1] {
+	case '<', '"', '\'', ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
 }
 
 func sipResolverProto(network string, secure bool) string {

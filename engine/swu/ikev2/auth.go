@@ -513,45 +513,25 @@ func runIKE_AUTH_AKAChallenge(ctx context.Context, cfg AKAChallengeConfig, offer
 		if cfg.SIM == nil {
 			return AKAChallengeResult{}, fmt.Errorf("%w: SIM provider is nil", ErrInvalidAuthConfig)
 		}
-		rand16, autn16, err := eapaka.ChallengeRANDAndAUTN(cfg.Request)
+		challenge, err := eapaka.BuildChallengeResponseFromProvider(cfg.Identity, cfg.Request, cfg.SIM, cfg.IdentityTranscript)
 		if err != nil {
-			return AKAChallengeResult{}, err
-		}
-		aka, err := cfg.SIM.CalculateAKA(rand16, autn16)
-		if err != nil {
-			switch {
-			case errors.Is(err, sim.ErrSyncFailure) && len(aka.AUTS) > 0:
-				eapResp, err = eapaka.BuildSynchronizationFailureResponse(cfg.Request, aka.AUTS)
-				syncFailure = true
-			case errors.Is(err, sim.ErrAuthFailure):
-				eapResp, err = eapaka.BuildAuthenticationRejectResponse(cfg.Request)
-				authFailure = true
-			}
-			if err != nil {
-				return AKAChallengeResult{}, err
-			}
-		} else {
-			identity := strings.TrimSpace(cfg.Identity)
-			if identity == "" {
+			if strings.TrimSpace(cfg.Identity) == "" && errors.Is(err, eapaka.ErrInvalidKeyMaterial) {
 				return AKAChallengeResult{}, fmt.Errorf("%w: identity is empty", ErrInvalidAuthConfig)
 			}
-			eapResp, eapKeys, err = eapaka.BuildChallengeResponseWithCheckcode(identity, cfg.Request, aka, cfg.IdentityTranscript)
-			if errors.Is(err, eapaka.ErrBiddingDown) {
-				eapResp, err = eapaka.BuildAuthenticationRejectResponse(cfg.Request)
-				authFailure = true
-			}
-			if err != nil {
+			return AKAChallengeResult{}, err
+		}
+		eapResp = challenge.Response
+		eapKeys = challenge.Keys
+		syncFailure = challenge.SyncFailure
+		authFailure = challenge.AuthFailure
+		if !syncFailure && !authFailure {
+			if attrs, _, err := eapaka.DecryptChallengeEncryptedAttributes(cfg.Request, eapKeys); err != nil {
 				return AKAChallengeResult{}, err
-			}
-			if !authFailure {
-				if attrs, _, err := eapaka.DecryptChallengeEncryptedAttributes(cfg.Request, eapKeys); err != nil {
+			} else if len(attrs) > 0 {
+				encryptedAttributes = attrs
+				identityState, err = eapaka.IdentityStateFromAttributes(attrs)
+				if err != nil {
 					return AKAChallengeResult{}, err
-				} else if len(attrs) > 0 {
-					encryptedAttributes = attrs
-					identityState, err = eapaka.IdentityStateFromAttributes(attrs)
-					if err != nil {
-						return AKAChallengeResult{}, err
-					}
 				}
 			}
 		}

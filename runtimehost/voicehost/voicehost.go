@@ -1015,11 +1015,10 @@ type SDPInfo struct {
 }
 
 var (
-	sdpConnRE      = regexp.MustCompile(`(?m)^c=IN IP[46] ([^\r\n]+)`)
-	sdpMediaRE     = regexp.MustCompile(`(?m)^m=audio ([0-9]+) [A-Z0-9/]+(.*)$`)
-	sdpRTCPRE      = regexp.MustCompile(`(?m)^a=rtcp:([0-9]+)(?:\s+IN\s+IP[46]\s+([^\r\n]+))?`)
-	sdpRTPMapRE    = regexp.MustCompile(`(?mi)^a=rtpmap:([0-9]+)\s+telephone-event/([0-9]+)(?:/[0-9]+)?\s*$`)
-	sdpDirectionRE = regexp.MustCompile(`(?m)^a=(sendrecv|sendonly|recvonly|inactive)\s*$`)
+	sdpConnRE   = regexp.MustCompile(`(?m)^c=IN IP[46] ([^\r\n]+)`)
+	sdpMediaRE  = regexp.MustCompile(`(?m)^m=audio ([0-9]+) [A-Z0-9/]+(.*)$`)
+	sdpRTCPRE   = regexp.MustCompile(`(?m)^a=rtcp:([0-9]+)(?:\s+IN\s+IP[46]\s+([^\r\n]+))?`)
+	sdpRTPMapRE = regexp.MustCompile(`(?mi)^a=rtpmap:([0-9]+)\s+telephone-event/([0-9]+)(?:/[0-9]+)?\s*$`)
 )
 
 func ParseSDP(body []byte) (SDPInfo, error) {
@@ -1072,16 +1071,7 @@ func ParseSDP(body []byte) (SDPInfo, error) {
 		out.TelephoneEventPayloads = map[uint8]int{DefaultRTPDTMFPayloadType: DefaultRTPDTMFClockRate}
 	}
 	out.PTimeMS, out.MaxPTimeMS = parseSDPAudioPacketizationTime(body)
-	if m := sdpDirectionRE.FindStringSubmatch(text); len(m) == 2 {
-		out.Direction = strings.TrimSpace(m[1])
-	}
-	if out.Direction == "" {
-		if ip.IsUnspecified() || out.MediaPort == 0 {
-			out.Direction = "inactive"
-		} else {
-			out.Direction = "sendrecv"
-		}
-	}
+	out.Direction = parseSDPAudioDirection(body, out.ConnectionIP, out.MediaPort)
 	return out, nil
 }
 

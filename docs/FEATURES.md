@@ -35,16 +35,20 @@ protocol layers needed by VoHive:
   length decoding
   over logical-channel APDUs or CRSM, runtime modem-access fallback from
   explicit identity readers to APDU/CRSM/AT+CRSM identity reads, SIM/ISIM
-  recovery error classification with opt-in non-destructive retry hooks, and USIM/ISIM
-  AKA AUTHENTICATE primitives
+  recovery error classification with opt-in non-destructive retry hooks,
+  reusable ISIM identity, USIM EF_IMSI, and EF_AD MNC-length decoders, and
+  USIM/ISIM AKA AUTHENTICATE primitives
 - carrier presets and JSON carrier overrides, including AT&T TS.43/E911
-  configuration for native `310/280` and `310/410` profiles
+  configuration for native `310/280` and `310/410` profiles, plus normalized
+  multi-candidate P-CSCF profile overrides for registrar failover
 - TS.43-style E911 entitlement bootstrap, JSON/XML response parsing for common
   emergency address, PDN/APN/realm, service URN/route, endpoint, expiry/cache,
   and location validation status variants, entitlement cache snapshots with
   refresh-window and route/service selection helpers, public entitlement parsing helpers,
   emergency service-category URN mapping, IMS emergency SIP Request-URI,
   `P-Access-Network-Info`, `Geolocation`, and MMTel service header helpers,
+  inline PIDF-LO `multipart/related` emergency INVITE body construction with
+  `cid:` Geolocation references,
   token/websheet handling, RAND/AUTN challenge response through the AKA
   provider, and EAP-AKA/AKA' relay packet response generation with
   Any/FullAuth/Permanent Identity selection, KDF negotiation, Notification ACK,
@@ -65,7 +69,8 @@ protocol layers needed by VoHive:
   handling, non-INVITE 1xx handling that waits for final responses while
   stopping UDP retransmits after a provisional response, and response
   correlation filtering for `Call-ID`, `CSeq`, and Via branch headers when
-  peers include transaction identifiers
+  peers include transaction identifiers, including automatic branch insertion
+  on caller-supplied Via headers that omit a branch on reused TCP flows
 - reusable SIP flow transport for REGISTER, MESSAGE, USSD, and voice dialog
   requests, preserving the REGISTER socket/local port for IMS NAT pinholes and
   offering explicit CRLF keepalive support, including sticky reuse of the
@@ -73,6 +78,8 @@ protocol layers needed by VoHive:
 - SIP server resolution with injectable policy hooks and default `_sip._udp` /
   `_sip._tcp` SRV lookup, A/AAAA expansion, ordered candidate lists, and
   REGISTER/dialog transport failover before direct host:port fallback,
+  including IMS header-style SIP URI extraction for name-addr,
+  Route/Service-Route lists, IPv6 literals, and `sips` default ports,
   including REGISTER and dialog request failover on recoverable P-CSCF final
   responses such as 408/503 or other transient 5xx statuses, plus retryable
   transport failures such as timeouts and TCP connection resets
@@ -82,7 +89,8 @@ protocol layers needed by VoHive:
   401/407 authentication retry, 423 `Min-Expires` retry handling, associated
   URI, Service-Route, Path, Security-Server, optional IMS security-plan
   installer hook before authenticated REGISTER retries, and Contact expiry
-  capture, plus a runtime `IMSRegistrar` adapter for the wire transport
+  capture, plus a runtime `IMSRegistrar` adapter for the wire transport with
+  prepared P-CSCF candidate fallback
 - IMS REGISTER refresh maintenance on the reusable SIP flow, including
   expiry-based renewal, 423 `Min-Expires` retry handling, retry scheduling,
   binding/auth/CSeq state updates, full re-registration after recoverable
@@ -100,7 +108,9 @@ protocol layers needed by VoHive:
   `Expires: 0`, Contact `expires=0`, Security-Verify, and Digest/AKA retry on
   401/407 challenges
 - SMS segmentation, IMS SIP `MESSAGE` transport hooks, inbound SMS, delivery
-  report matching, and USSD session transport hooks, including 3xx Contact
+  report matching, CPIM and IMS `Content-Transfer-Encoding` decoding for
+  base64/quoted-printable SMS payloads, strict UCS2/8-bit user-data length
+  validation, and USSD session transport hooks, including 3xx Contact
   redirect retries, TP-SRR delivery-status requests, SMS RP-ERROR/
   STATUS-REPORT cause mapping, RP-ACK user-data STATUS-REPORT handling,
   RP-ERROR diagnostics/user-data preservation, SMS-DELIVER TP-PID/TP-DCS and
@@ -130,8 +140,9 @@ protocol layers needed by VoHive:
   agent, ACK/BYE/CANCEL dialog handling with release Reason/body forwarding,
   IMS BYE/CANCEL response status/body/header capture and local softphone
   response propagation,
-  RTP/RTCP media relay endpoint allocation, SDP media/RTCP rewriting, packet
-  forwarding, and dialog termination hooks
+  RTP/RTCP media relay endpoint allocation, SDP media/RTCP rewriting,
+  audio-scoped SDP direction parsing/rewrite and answer-direction negotiation,
+  packet forwarding, and dialog termination hooks
 - SWu tunnel manager/session contracts with startup validation, tunnel readiness
   state integration, shutdown cleanup, and MOBIKE delegation
 - IKEv2 binary header/payload framing, Notify/KE/Nonce/EAP helpers, NAT
@@ -331,6 +342,9 @@ protocol layers needed by VoHive:
 - in-dialog re-INVITE handling for IMS-originated media renegotiation, including
   local client forwarding, SDP answer rewriting, Contact refresh, and ACK CSeq
   tracking for the latest successful INVITE transaction
+- redacted trace fixture validation with reusable replay streams for ordered
+  inbound/outbound SIP wire transcripts, preserving CRLF framing while checking
+  sensitive data before materialization
 
 ## Known Gaps
 

@@ -420,29 +420,50 @@ func RewriteSDPMediaDirection(body []byte, direction string) ([]byte, error) {
 	text := strings.ReplaceAll(string(body), "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	out := make([]string, 0, len(lines)+1)
-	replaced := false
 	inserted := false
+	inAudio := false
+	sawAudio := false
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		if isSDPDirectionLine(line) {
-			if !replaced {
-				out = append(out, "a="+direction)
-				replaced = true
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "m=") {
+			inAudio = false
+			fields := strings.Fields(line)
+			if !sawAudio && len(fields) > 0 && strings.EqualFold(fields[0], "m=audio") {
+				inAudio = true
+				sawAudio = true
+				inserted = true
+				out = append(out, line, "a="+direction)
+				continue
 			}
+			out = append(out, line)
+			continue
+		}
+		if inAudio && isSDPDirectionLine(line) {
 			continue
 		}
 		out = append(out, line)
-		if !replaced && !inserted && strings.HasPrefix(line, "m=audio ") {
-			out = append(out, "a="+direction)
-			inserted = true
-		}
 	}
-	if !replaced && !inserted {
+	if !inserted {
 		out = append(out, "a="+direction)
 	}
 	return []byte(strings.Join(out, "\r\n") + "\r\n"), nil
+}
+
+func SelectSDPAnswerDirection(offerDirection, localDirection string) (string, error) {
+	offer, err := normalizeOptionalSDPDirection(offerDirection)
+	if err != nil {
+		return "", err
+	}
+	local, err := normalizeOptionalSDPDirection(localDirection)
+	if err != nil {
+		return "", err
+	}
+	answerSends := sdpDirectionAllowsSend(local) && sdpDirectionAllowsReceive(offer)
+	answerReceives := sdpDirectionAllowsReceive(local) && sdpDirectionAllowsSend(offer)
+	return sdpDirectionFromCapabilities(answerSends, answerReceives), nil
 }
 
 func normalizeExplicitSDPDirection(direction string) (string, error) {
@@ -454,12 +475,94 @@ func normalizeExplicitSDPDirection(direction string) (string, error) {
 	}
 }
 
+func normalizeOptionalSDPDirection(direction string) (string, error) {
+	direction = strings.TrimSpace(direction)
+	if direction == "" {
+		return "sendrecv", nil
+	}
+	return normalizeExplicitSDPDirection(direction)
+}
+
 func isSDPDirectionLine(line string) bool {
+	_, ok := parseSDPDirectionLine(line)
+	return ok
+}
+
+func parseSDPAudioDirection(body []byte, connectionIP string, mediaPort int) string {
+	lines := sdpSecurityLines(body)
+	beforeFirstMedia := true
+	inFirstAudio := false
+	sawAudio := false
+	sessionDirection := ""
+	audioDirection := ""
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "m=") {
+			if sawAudio && inFirstAudio {
+				break
+			}
+			beforeFirstMedia = false
+			inFirstAudio = false
+			fields := strings.Fields(line)
+			if !sawAudio && len(fields) > 0 && strings.EqualFold(fields[0], "m=audio") {
+				inFirstAudio = true
+				sawAudio = true
+			}
+			continue
+		}
+		if direction, ok := parseSDPDirectionLine(line); ok {
+			if beforeFirstMedia {
+				sessionDirection = direction
+				continue
+			}
+			if inFirstAudio {
+				audioDirection = direction
+			}
+		}
+	}
+	if audioDirection != "" {
+		return audioDirection
+	}
+	if sessionDirection != "" {
+		return sessionDirection
+	}
+	if ip := net.ParseIP(strings.TrimSpace(connectionIP)); ip != nil && ip.IsUnspecified() {
+		return "inactive"
+	}
+	if mediaPort == 0 {
+		return "inactive"
+	}
+	return "sendrecv"
+}
+
+func parseSDPDirectionLine(line string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive":
-		return true
+	case "a=sendrecv":
+		return "sendrecv", true
+	case "a=sendonly":
+		return "sendonly", true
+	case "a=recvonly":
+		return "recvonly", true
+	case "a=inactive":
+		return "inactive", true
 	default:
-		return false
+		return "", false
+	}
+}
+
+func sdpDirectionFromCapabilities(send, receive bool) string {
+	switch {
+	case send && receive:
+		return "sendrecv"
+	case send:
+		return "sendonly"
+	case receive:
+		return "recvonly"
+	default:
+		return "inactive"
 	}
 }
 

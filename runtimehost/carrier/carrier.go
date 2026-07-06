@@ -1,6 +1,7 @@
 package carrier
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,52 @@ type E911Config struct {
 }
 
 type NetworkConfig struct {
-	IMSRealm             string `json:"ims_realm"`
-	PrivateIdentityRealm string `json:"private_identity_realm"`
-	NAIRealm             string `json:"nai_realm"`
-	PCSCFFQDN            string `json:"pcscf_fqdn"`
-	EPDGFQDN             string `json:"epdg_fqdn"`
-	EmergencyDomain      string `json:"emergency_domain"`
+	IMSRealm             string   `json:"ims_realm"`
+	PrivateIdentityRealm string   `json:"private_identity_realm"`
+	NAIRealm             string   `json:"nai_realm"`
+	PCSCFFQDN            string   `json:"pcscf_fqdn"`
+	PCSCFFQDNs           []string `json:"pcscf_fqdns,omitempty"`
+	EPDGFQDN             string   `json:"epdg_fqdn"`
+	EmergencyDomain      string   `json:"emergency_domain"`
+}
+
+func (cfg *NetworkConfig) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		IMSRealm             string          `json:"ims_realm"`
+		PrivateIdentityRealm string          `json:"private_identity_realm"`
+		NAIRealm             string          `json:"nai_realm"`
+		PCSCFFQDN            string          `json:"pcscf_fqdn"`
+		PCSCFFQDNs           json.RawMessage `json:"pcscf_fqdns"`
+		PCSCFFQDNList        json.RawMessage `json:"pcscf_fqdn_list"`
+		PCSCF                json.RawMessage `json:"pcscf"`
+		EPDGFQDN             string          `json:"epdg_fqdn"`
+		EmergencyDomain      string          `json:"emergency_domain"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	pcscf, err := stringsFromNetworkJSON(raw.PCSCFFQDNs, true)
+	if err != nil {
+		return err
+	}
+	pcscfList, err := stringsFromNetworkJSON(raw.PCSCFFQDNList, true)
+	if err != nil {
+		return err
+	}
+	pcscfAlias, err := stringsFromNetworkJSON(raw.PCSCF, false)
+	if err != nil {
+		return err
+	}
+	*cfg = NetworkConfig{
+		IMSRealm:             raw.IMSRealm,
+		PrivateIdentityRealm: raw.PrivateIdentityRealm,
+		NAIRealm:             raw.NAIRealm,
+		PCSCFFQDN:            raw.PCSCFFQDN,
+		PCSCFFQDNs:           append(append(pcscf, pcscfList...), pcscfAlias...),
+		EPDGFQDN:             raw.EPDGFQDN,
+		EmergencyDomain:      raw.EmergencyDomain,
+	}
+	return nil
 }
 
 type SubscriberProfileInput struct {
@@ -348,6 +389,12 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 	cfg.PrivateIdentityRealm = normalizeDomainName(cfg.PrivateIdentityRealm)
 	cfg.NAIRealm = normalizeDomainName(cfg.NAIRealm)
 	cfg.PCSCFFQDN = normalizeDomainName(cfg.PCSCFFQDN)
+	pcscfList := normalizeNetworkStringList(cfg.PCSCFFQDNs...)
+	cfg.PCSCFFQDNs = appendNetworkStrings(nil, cfg.PCSCFFQDN)
+	cfg.PCSCFFQDNs = appendNetworkStrings(cfg.PCSCFFQDNs, pcscfList...)
+	if cfg.PCSCFFQDN == "" && len(cfg.PCSCFFQDNs) > 0 {
+		cfg.PCSCFFQDN = cfg.PCSCFFQDNs[0]
+	}
 	cfg.EPDGFQDN = normalizeDomainName(cfg.EPDGFQDN)
 	cfg.EmergencyDomain = normalizeDomainName(cfg.EmergencyDomain)
 	if mcc == "" || mnc == "" {
@@ -371,6 +418,7 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 	if cfg.PCSCFFQDN == "" {
 		cfg.PCSCFFQDN = DefaultPCSCFFQDN(mcc, mnc)
 	}
+	cfg.PCSCFFQDNs = appendNetworkStrings(cfg.PCSCFFQDNs, cfg.PCSCFFQDN)
 	if cfg.EPDGFQDN == "" {
 		cfg.EPDGFQDN = DefaultEPDGFQDN(mcc, mnc)
 	}
@@ -378,6 +426,76 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 		cfg.EmergencyDomain = DefaultEmergencyDomain(mcc, mnc)
 	}
 	return cfg
+}
+
+func PCSCFCandidates(network NetworkConfig) []string {
+	network = normalizeNetworkConfig("", "", network)
+	return append([]string(nil), network.PCSCFFQDNs...)
+}
+
+func stringsFromNetworkJSON(raw json.RawMessage, strict bool) ([]string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err == nil {
+		return values, nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return splitNetworkStringList(value), nil
+	}
+	if !strict {
+		return nil, nil
+	}
+	return nil, errors.New("network P-CSCF candidates must be a string or string array")
+}
+
+func splitNetworkStringList(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ','
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field = strings.TrimSpace(field); field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+func normalizeNetworkStringList(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if normalized := normalizeDomainName(value); normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return out
+}
+
+func appendNetworkStrings(out []string, values ...string) []string {
+	for _, value := range values {
+		value = normalizeDomainName(value)
+		if value == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range out {
+			if existing == value {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func normalizeMCC(mcc string) string {

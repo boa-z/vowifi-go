@@ -3,10 +3,13 @@ package messaging
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/textproto"
 	"sort"
 	"strconv"
@@ -16,6 +19,7 @@ import (
 
 const IMSCPIMContentType = "message/cpim"
 
+const imsContentTransferEncodingHeader = "Content-Transfer-Encoding"
 const imsCPIMIMDNNamespace = "urn:ietf:params:imdn"
 const imsIMDNContentType = "message/imdn+xml"
 
@@ -56,6 +60,10 @@ func ParseIMSCPIMMessage(body []byte) (IMSCPIMMessage, error) {
 			return IMSCPIMMessage{}, errors.New("CPIM content truncated")
 		}
 		content = content[:n]
+	}
+	content, _, err = decodeIMSContentTransferEncoding(contentHeaders, content)
+	if err != nil {
+		return IMSCPIMMessage{}, fmt.Errorf("CPIM content: %w", err)
 	}
 	return IMSCPIMMessage{
 		Headers:        messageHeaders,
@@ -418,6 +426,65 @@ func normalizedIMSMessageContentType(contentType string) string {
 		contentType = contentType[:semi]
 	}
 	return strings.ToLower(strings.TrimSpace(contentType))
+}
+
+func decodeIMSContentTransferEncoding(headers map[string][]string, body []byte) ([]byte, bool, error) {
+	encoding := normalizeIMSContentTransferEncoding(firstCPIMHeaderValue(headers, imsContentTransferEncodingHeader))
+	if encoding == "" {
+		return body, false, nil
+	}
+	switch encoding {
+	case "7bit", "8bit", "binary":
+		return body, true, nil
+	case "base64":
+		decoded, err := decodeIMSBase64Content(body)
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid IMS content-transfer-encoding base64: %w", err)
+		}
+		return decoded, true, nil
+	case "quoted-printable":
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid IMS content-transfer-encoding quoted-printable: %w", err)
+		}
+		return decoded, true, nil
+	default:
+		return nil, true, fmt.Errorf("unsupported IMS content-transfer-encoding: %s", encoding)
+	}
+}
+
+func normalizeIMSContentTransferEncoding(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), `"`)
+	if value == "" {
+		return ""
+	}
+	if token, _, ok := strings.Cut(value, ";"); ok {
+		value = token
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func decodeIMSBase64Content(body []byte) ([]byte, error) {
+	compact := make([]byte, 0, len(body))
+	for _, b := range body {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			compact = append(compact, b)
+		}
+	}
+	if len(compact) == 0 {
+		return []byte{}, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(compact))
+	if err == nil {
+		return decoded, nil
+	}
+	if decoded, rawErr := base64.RawStdEncoding.DecodeString(string(compact)); rawErr == nil {
+		return decoded, nil
+	}
+	return nil, err
 }
 
 func cloneCPIMHeaders(headers map[string][]string) map[string][]string {

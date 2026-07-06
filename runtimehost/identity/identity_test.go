@@ -157,6 +157,8 @@ func TestPrepareStartUsesCarrierPrivateIdentityRealmOverride(t *testing.T) {
 			"network": {
 				"ims_realm": " ims.example.test. ",
 				"private_identity_realm": " private.example.test. ",
+				"pcscf_fqdn": " pcscf-a.example.test. ",
+				"pcscf_fqdns": ["pcscf-b.example.test", "pcscf-a.example.test"],
 				"epdg_fqdn": " epdg.example.test. "
 			}
 		}
@@ -180,6 +182,9 @@ func TestPrepareStartUsesCarrierPrivateIdentityRealmOverride(t *testing.T) {
 	}
 	if prepared.EPDGAddr != "epdg.example.test" {
 		t.Fatalf("EPDGAddr=%q, want override", prepared.EPDGAddr)
+	}
+	if !reflect.DeepEqual(prepared.PCSCFFQDNs, []string{"pcscf-a.example.test", "pcscf-b.example.test"}) {
+		t.Fatalf("PCSCFFQDNs=%+v", prepared.PCSCFFQDNs)
 	}
 	if prepared.EffectiveCarrier.MCC != "001" || prepared.EffectiveCarrier.MNC != "010" ||
 		prepared.EffectiveCarrier.PresetID != "001010" {

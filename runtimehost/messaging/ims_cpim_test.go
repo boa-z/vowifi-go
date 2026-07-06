@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"bytes"
+	"encoding/base64"
 	"net/textproto"
 	"strconv"
 	"strings"
@@ -104,6 +105,81 @@ func TestBuildIMSCPIMMessageWithHeadersDeduplicatesContentLength(t *testing.T) {
 	content := textproto.MIMEHeader(parsed.ContentHeaders)
 	if got := content.Get("Content-Length"); got != strconv.Itoa(len(body)) {
 		t.Fatalf("Content-Length=%q want %d", got, len(body))
+	}
+}
+
+func TestParseIMSCPIMMessageDecodesContentTransferEncoding(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		encoding    string
+		wireBody    []byte
+		wantBody    []byte
+	}{
+		{
+			name:        "base64 3gpp sms",
+			contentType: IMS3GPPSMSContentType,
+			encoding:    "base64",
+			wantBody:    []byte{0x00, 0x34, 0x00, 0x05, 0x05, 0x01, 0x80, 0xf6, 0x00, 0x00, 0x01, 0x62, 0x72, 0x6f, 0x6b, 0x65, 0x6e},
+		},
+		{
+			name:        "quoted printable text",
+			contentType: "text/plain",
+			encoding:    "quoted-printable",
+			wireBody:    []byte("hello=3Dworld=0A"),
+			wantBody:    []byte("hello=world\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wireBody := tt.wireBody
+			if tt.encoding == "base64" {
+				wireBody = []byte(base64.StdEncoding.EncodeToString(tt.wantBody))
+			}
+			body := []byte(strings.Join([]string{
+				"From: <sip:alice@example.com>",
+				"To: <sip:bob@example.com>",
+				"",
+				"Content-Type: " + tt.contentType,
+				"Content-Transfer-Encoding: " + tt.encoding,
+				"Content-Length: " + strconv.Itoa(len(wireBody)),
+				"",
+				string(wireBody),
+			}, "\r\n"))
+
+			parsed, err := ParseIMSCPIMMessage(body)
+			if err != nil {
+				t.Fatalf("ParseIMSCPIMMessage() error = %v body=%s", err, body)
+			}
+			if parsed.ContentType != normalizedIMSMessageContentType(tt.contentType) || string(parsed.Body) != string(tt.wantBody) {
+				t.Fatalf("parsed contentType=%q body=%x want %q/%x", parsed.ContentType, parsed.Body, normalizedIMSMessageContentType(tt.contentType), tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestParseIMSCPIMMessageDecodesWrappedBase64ContentTransferEncoding(t *testing.T) {
+	wantBody := []byte{0x00, 0x34, 0x00, 0x05, 0x05, 0x01, 0x80, 0xf6, 0x00, 0x00, 0x01}
+	encoded := base64.StdEncoding.EncodeToString(wantBody)
+	wireBody := []byte(encoded[:8] + "\r\n\t" + encoded[8:])
+	body := []byte(strings.Join([]string{
+		"From: <sip:alice@example.com>",
+		"To: <sip:bob@example.com>",
+		"",
+		"Content-Type: " + IMS3GPPSMSContentType,
+		"Content-Transfer-Encoding: base64",
+		"Content-Length: " + strconv.Itoa(len(wireBody)),
+		"",
+		string(wireBody),
+	}, "\r\n"))
+
+	parsed, err := ParseIMSCPIMMessage(body)
+	if err != nil {
+		t.Fatalf("ParseIMSCPIMMessage() error = %v", err)
+	}
+	if string(parsed.Body) != string(wantBody) {
+		t.Fatalf("body=%x want %x", parsed.Body, wantBody)
 	}
 }
 

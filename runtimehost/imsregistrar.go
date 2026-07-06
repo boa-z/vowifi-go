@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -170,6 +171,13 @@ func (r WireIMSRegistrar) resolverForConfig(cfg IMSRegistrationConfig) voiceclie
 	if r.Resolver != nil {
 		return r.Resolver
 	}
+	if candidates := preparedPCSCFCandidates(cfg); len(candidates) > 0 {
+		return preparedPCSCFResolver{
+			Candidates: candidates,
+			DNSServers: append([]string(nil), cfg.Tunnel.DNSServers...),
+			Timeout:    r.Timeout,
+		}
+	}
 	if len(cfg.Tunnel.DNSServers) == 0 {
 		return nil
 	}
@@ -177,6 +185,98 @@ func (r WireIMSRegistrar) resolverForConfig(cfg IMSRegistrationConfig) voiceclie
 		DNSServers: append([]string(nil), cfg.Tunnel.DNSServers...),
 		Timeout:    r.Timeout,
 	}
+}
+
+type preparedPCSCFResolver struct {
+	Candidates []string
+	DNSServers []string
+	Timeout    time.Duration
+}
+
+func (r preparedPCSCFResolver) ResolveSIPServer(ctx context.Context, network, uri string) (string, error) {
+	targets, err := r.ResolveSIPServers(ctx, network, uri)
+	if err != nil {
+		return "", err
+	}
+	if len(targets) == 0 {
+		return "", errors.New("SIP resolver returned no P-CSCF targets")
+	}
+	return targets[0], nil
+}
+
+func (r preparedPCSCFResolver) ResolveSIPServers(ctx context.Context, network, uri string) ([]string, error) {
+	resolver := voiceclient.NetSIPResolver{
+		DNSServers: append([]string(nil), r.DNSServers...),
+		Timeout:    r.Timeout,
+	}
+	var out []string
+	var lastErr error
+	for _, candidate := range r.Candidates {
+		candidateURI := pcscfCandidateSIPURI(candidate)
+		if candidateURI == "" {
+			continue
+		}
+		targets, err := resolver.ResolveSIPServers(ctx, network, candidateURI)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		out = appendRuntimeTargets(out, targets...)
+	}
+	if len(out) == 0 && strings.TrimSpace(uri) != "" {
+		targets, err := resolver.ResolveSIPServers(ctx, network, uri)
+		if err != nil {
+			lastErr = err
+		} else {
+			out = appendRuntimeTargets(out, targets...)
+		}
+	}
+	if len(out) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return out, nil
+}
+
+func preparedPCSCFCandidates(cfg IMSRegistrationConfig) []string {
+	if cfg.Prepared == nil {
+		return nil
+	}
+	return appendRuntimeTargets(nil, cfg.Prepared.PCSCFFQDNs...)
+}
+
+func pcscfCandidateSIPURI(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return ""
+	}
+	lower := strings.ToLower(candidate)
+	if strings.HasPrefix(lower, "sip:") || strings.HasPrefix(lower, "sips:") {
+		return candidate
+	}
+	if ip := net.ParseIP(strings.Trim(candidate, "[]")); ip != nil && strings.Contains(ip.String(), ":") {
+		return "sip:[" + ip.String() + "]"
+	}
+	return "sip:" + candidate
+}
+
+func appendRuntimeTargets(out []string, targets ...string) []string {
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range out {
+			if existing == target {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, target)
+		}
+	}
+	return out
 }
 
 type imsRegistrationMaintenance struct {

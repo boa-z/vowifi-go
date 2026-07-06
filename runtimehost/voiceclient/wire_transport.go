@@ -284,8 +284,21 @@ func ensureSIPRequestVia(msg *SIPRequestMessage, transport string, localAddr net
 	if msg.Headers == nil {
 		msg.Headers = make(map[string]string)
 	}
-	if firstHeaderValue(msg.Headers, "Via") == "" {
+	viaKey := ""
+	viaValue := ""
+	for key, value := range msg.Headers {
+		if strings.EqualFold(key, "Via") {
+			viaKey = key
+			viaValue = strings.TrimSpace(value)
+			break
+		}
+	}
+	if viaValue == "" {
 		msg.Headers["Via"] = buildViaHeader(transport, localAddr)
+		return
+	}
+	if sipViaBranch(viaValue) == "" {
+		msg.Headers[viaKey] = strings.TrimRight(viaValue, " \t;") + ";branch=" + newBranch()
 	}
 }
 

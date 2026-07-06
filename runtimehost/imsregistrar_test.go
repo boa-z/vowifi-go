@@ -276,6 +276,80 @@ func TestWireIMSRegistrarDefaultResolverUsesTunnelDNS(t *testing.T) {
 	}
 }
 
+func TestWireIMSRegistrarUsesPreparedPCSCFFallbackCandidates(t *testing.T) {
+	first, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(first) error = %v", err)
+	}
+	defer first.Close()
+	second, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(second) error = %v", err)
+	}
+	defer second.Close()
+
+	readOne := func(pc net.PacketConn, response string, ch chan<- string) {
+		buf := make([]byte, 65535)
+		_ = pc.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			ch <- "read error: " + err.Error()
+			return
+		}
+		wire := string(append([]byte(nil), buf[:n]...))
+		_, _ = pc.WriteTo([]byte(response), addr)
+		ch <- wire
+	}
+	firstSeen := make(chan string, 1)
+	secondSeen := make(chan string, 1)
+	go readOne(first, "SIP/2.0 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n", firstSeen)
+	go readOne(second, "SIP/2.0 200 OK\r\nP-Associated-URI: <sip:user@ims.example>\r\nContact: <sip:user@192.0.2.10:5060>;expires=600\r\nContent-Length: 0\r\n\r\n", secondSeen)
+
+	res, err := WireIMSRegistrar{
+		ContactHost:           "192.0.2.10",
+		ContactPort:           5060,
+		Timeout:               time.Second,
+		MaxRetransmits:        1,
+		RetransmitInterval:    20 * time.Millisecond,
+		MaxRetransmitInterval: 20 * time.Millisecond,
+		DisableRefresh:        true,
+		DisableKeepalive:      true,
+	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
+		DeviceID: "dev-prepared-pcscf",
+		TraceID:  "trace-prepared-pcscf",
+		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+		Prepared: &identity.PreparedSession{
+			Profile:    identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+			PCSCFFQDNs: []string{first.LocalAddr().String(), second.LocalAddr().String()},
+			IMSIdentity: identity.IMSIdentityResolution{
+				IMPI:   "impi@example",
+				IMPU:   "sip:user@ims.example",
+				Domain: "ims.example",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterIMS() error = %v", err)
+	}
+	if !res.Registered || res.StatusCode != 200 {
+		t.Fatalf("result=%+v", res)
+	}
+	if flow, ok := res.VoiceTransport.(*voiceclient.WireSIPFlow); ok {
+		defer flow.Close()
+	}
+
+	firstWire := waitWire(t, firstSeen)
+	secondWire := waitWire(t, secondSeen)
+	if !strings.Contains(firstWire, "REGISTER sip:ims.example SIP/2.0") ||
+		!strings.Contains(firstWire, "Call-ID: trace-prepared-pcscf\r\n") {
+		t.Fatalf("first P-CSCF wire=%q", firstWire)
+	}
+	if !strings.Contains(secondWire, "REGISTER sip:ims.example SIP/2.0") ||
+		!strings.Contains(secondWire, "Call-ID: trace-prepared-pcscf\r\n") {
+		t.Fatalf("second P-CSCF wire=%q", secondWire)
+	}
+}
+
 func TestWireIMSRegistrarDefaultFlowReusesRegisterSocketForSMS(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -1127,6 +1201,17 @@ func (s *wireIMSRegistrarSIM) CalculateAKA(rand16, autn16 []byte) (sim.AKAResult
 }
 
 func (s *wireIMSRegistrarSIM) Close() error { return nil }
+
+func waitWire(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case wire := <-ch:
+		return wire
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SIP wire")
+	}
+	return ""
+}
 
 func runtimeBytesFrom(start byte, n int) []byte {
 	out := make([]byte, n)

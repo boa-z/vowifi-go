@@ -528,6 +528,31 @@ func TestParseSMSDeliverTPDUUCS2WithConcatUDH(t *testing.T) {
 	}
 }
 
+func TestParseSMSDeliverTPDURejectsTruncatedOctetEncodedUserData(t *testing.T) {
+	tests := []struct {
+		name string
+		tpdu string
+	}{
+		{
+			name: "ucs2 declared longer than payload",
+			tpdu: "0005810180F6000862705021436500044F60",
+		},
+		{
+			name: "8bit declared longer than payload",
+			tpdu: "0005810180F6000462705021436500036F6B",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseSMSDeliverTPDU(mustHex(t, tt.tpdu))
+			if err == nil || !strings.Contains(err.Error(), "SMS user data truncated") {
+				t.Fatalf("ParseSMSDeliverTPDU() err=%v, want truncated user data", err)
+			}
+		})
+	}
+}
+
 func TestParseSMSDeliverTPDUPreservesProtocolMetadata(t *testing.T) {
 	tpdu := mustHex(t, "E405810180F67F0862705021436500080500037A02014F60")
 	deliver, err := ParseSMSDeliverTPDU(tpdu)

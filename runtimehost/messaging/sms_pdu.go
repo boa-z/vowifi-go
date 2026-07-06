@@ -1270,22 +1270,16 @@ func decodeSMSUserDataWithHeader(data []byte, udl int, dcs byte, hasUDH bool) (s
 	}
 	switch smsDCSAlphabet(dcs) {
 	case "ucs2":
-		payloadOctets := udl
-		if hasUDH {
-			payloadOctets -= len(udh)
-		}
-		if payloadOctets < 0 || payloadOctets > len(payload) {
-			payloadOctets = len(payload)
+		payloadOctets, err := smsOctetUserDataLength(udl, udh, payload)
+		if err != nil {
+			return "", SMSUserDataHeaderInfo{}, err
 		}
 		text, err := decodeUCS2(payload[:payloadOctets])
 		return text, headerInfo, err
 	case "8bit":
-		payloadOctets := udl
-		if hasUDH {
-			payloadOctets -= len(udh)
-		}
-		if payloadOctets < 0 || payloadOctets > len(payload) {
-			payloadOctets = len(payload)
+		payloadOctets, err := smsOctetUserDataLength(udl, udh, payload)
+		if err != nil {
+			return "", SMSUserDataHeaderInfo{}, err
 		}
 		return strings.ToValidUTF8(string(payload[:payloadOctets]), ""), headerInfo, nil
 	default:
@@ -1302,6 +1296,20 @@ func decodeSMSUserDataWithHeader(data []byte, udl int, dcs byte, hasUDH bool) (s
 		}
 		return decodeGSM7WithLanguage(unpackSeptets(payload, septets, fillBits), headerInfo.LockingShiftLang, headerInfo.SingleShiftLang), headerInfo, nil
 	}
+}
+
+func smsOctetUserDataLength(udl int, udh []byte, payload []byte) (int, error) {
+	payloadOctets := udl
+	if len(udh) > 0 {
+		payloadOctets -= len(udh)
+	}
+	if payloadOctets < 0 {
+		return 0, fmt.Errorf("SMS user data length %d is shorter than UDH length %d", udl, len(udh))
+	}
+	if payloadOctets > len(payload) {
+		return 0, fmt.Errorf("SMS user data truncated: need %d octets, have %d", payloadOctets, len(payload))
+	}
+	return payloadOctets, nil
 }
 
 func splitSMSUDH(data []byte, hasUDH bool) (udh []byte, payload []byte, headerSeptets int, headerInfo SMSUserDataHeaderInfo, err error) {

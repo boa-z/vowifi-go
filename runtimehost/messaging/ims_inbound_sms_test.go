@@ -3,6 +3,7 @@ package messaging
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"mime/multipart"
 	"net/textproto"
 	"strings"
@@ -104,6 +105,49 @@ func TestHandleIMSMessageAcceptsMultipartCPIM3GPPSMS(t *testing.T) {
 	}
 	if reply.ContentType != IMS3GPPSMSContentType || string(reply.Body) != string(BuildSMSRPAck(0x34)) {
 		t.Fatalf("reply=%+v body=%x", reply, reply.Body)
+	}
+	if len(dispatch.events) != 1 {
+		t.Fatalf("events=%d", len(dispatch.events))
+	}
+	got, ok := dispatch.events[0].(eventhost.SMSReceived)
+	if !ok || got.Sender != "10086" || got.Content != "hello" {
+		t.Fatalf("event=%+v", dispatch.events[0])
+	}
+}
+
+func TestHandleIMSMessageAcceptsMultipartBase64TransferEncoded3GPPSMS(t *testing.T) {
+	dispatch := &fakeDispatcher{}
+	svc := NewService("dev-1", "310280233641503", nil, dispatch)
+	tpdu := mustHex(t, "0005810180F600006270502143650005E8329BFD06")
+	rpdu := imsRPDataBody(0x36, tpdu)
+	boundary := "ims-message-base64-sms"
+	body := buildIMSMultipartTestBody(t, boundary, []imsMultipartTestPart{
+		{
+			headers: map[string][]string{"Content-Type": {"application/sdp"}},
+			body:    []byte("v=0\r\n"),
+		},
+		{
+			headers: map[string][]string{
+				"Content-Type":              {IMS3GPPSMSContentType},
+				"Content-Transfer-Encoding": {"base64"},
+			},
+			body: []byte(base64.StdEncoding.EncodeToString(rpdu)),
+		},
+	})
+
+	result, err := svc.HandleIMSMessage(context.Background(), IMSMessageRequest{
+		CallID:      "sms-downlink-multipart-base64",
+		ContentType: `multipart/mixed; boundary="` + boundary + `"`,
+		Body:        body,
+	})
+	if err != nil {
+		t.Fatalf("HandleIMSMessage() error = %v", err)
+	}
+	if result.StatusCode != 200 || result.ReplyContentType != IMS3GPPSMSContentType || string(result.ReplyBody) != string(BuildSMSRPAck(0x36)) {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Incoming == nil || result.Incoming.Sender != "10086" || result.Incoming.Content != "hello" {
+		t.Fatalf("incoming=%+v", result.Incoming)
 	}
 	if len(dispatch.events) != 1 {
 		t.Fatalf("events=%d", len(dispatch.events))

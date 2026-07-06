@@ -1024,6 +1024,113 @@ func TestWireSIPFlowIgnoresStaleMatchedHeadersOnReusedUDPFlow(t *testing.T) {
 	}
 }
 
+func TestWireSIPFlowBranchesCallerViaAndIgnoresLateTCPFinal(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	seen := make(chan []string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			seen <- []string{"accept error: " + err.Error()}
+			return
+		}
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		firstRaw, err := readSIPStreamMessage(reader)
+		if err != nil {
+			seen <- []string{"read first error: " + err.Error()}
+			return
+		}
+		firstReq, err := ParseSIPRequest(firstRaw)
+		if err != nil {
+			seen <- []string{"parse first error: " + err.Error()}
+			return
+		}
+		firstOK, err := BuildSIPResponseWire(firstReq, 200, "OK", nil, nil)
+		if err != nil {
+			seen <- []string{"build first ok error: " + err.Error()}
+			return
+		}
+		if _, err := conn.Write(firstOK); err != nil {
+			seen <- []string{"write first ok error: " + err.Error()}
+			return
+		}
+
+		secondRaw, err := readSIPStreamMessage(reader)
+		if err != nil {
+			seen <- []string{string(firstRaw), "read second error: " + err.Error()}
+			return
+		}
+		secondReq, err := ParseSIPRequest(secondRaw)
+		if err != nil {
+			seen <- []string{string(firstRaw), "parse second error: " + err.Error()}
+			return
+		}
+		stale, err := BuildSIPResponseWire(firstReq, 486, "Busy Here", nil, nil)
+		if err != nil {
+			seen <- []string{string(firstRaw), string(secondRaw), "build stale error: " + err.Error()}
+			return
+		}
+		secondOK, err := BuildSIPResponseWire(secondReq, 200, "OK", nil, nil)
+		if err != nil {
+			seen <- []string{string(firstRaw), string(secondRaw), "build second ok error: " + err.Error()}
+			return
+		}
+		_, _ = conn.Write(stale)
+		_, _ = conn.Write(secondOK)
+		seen <- []string{string(firstRaw), string(secondRaw)}
+	}()
+
+	headers := map[string]string{
+		"Via":          "SIP/2.0/TCP 192.0.2.10:5060",
+		"To":           "<sip:user@example>",
+		"From":         "<sip:user@example>;tag=t",
+		"Contact":      "<sip:user@192.0.2.10:5060>",
+		"Call-ID":      "flow-late-tcp-branch",
+		"CSeq":         "1 REGISTER",
+		"Max-Forwards": "70",
+	}
+	flow := &WireSIPFlow{Network: "tcp", ServerAddr: ln.Addr().String(), Timeout: time.Second}
+	defer flow.Close()
+	resp, err := flow.RoundTripRegister(context.Background(), RegisterMessage{
+		URI:     "sip:ims.example",
+		Headers: headers,
+	})
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("first RoundTripRegister() response=%+v err=%v", resp, err)
+	}
+	resp, err = flow.RoundTripRegister(context.Background(), RegisterMessage{
+		URI:     "sip:ims.example",
+		Headers: headers,
+	})
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("second RoundTripRegister() response=%+v err=%v, want stale final ignored", resp, err)
+	}
+
+	requests := <-seen
+	if len(requests) != 2 {
+		t.Fatalf("requests=%d %+v", len(requests), requests)
+	}
+	firstReq, err := ParseSIPRequest([]byte(requests[0]))
+	if err != nil {
+		t.Fatalf("ParseSIPRequest(first) error = %v", err)
+	}
+	secondReq, err := ParseSIPRequest([]byte(requests[1]))
+	if err != nil {
+		t.Fatalf("ParseSIPRequest(second) error = %v", err)
+	}
+	firstVia := firstHeader(firstReq.Headers, "Via")
+	secondVia := firstHeader(secondReq.Headers, "Via")
+	if sipViaBranch(firstVia) == "" || sipViaBranch(secondVia) == "" || sipViaBranch(firstVia) == sipViaBranch(secondVia) {
+		t.Fatalf("Via branches first=%q second=%q", firstVia, secondVia)
+	}
+}
+
 func TestWireSIPFlowResetToNextTargetPreservesCandidates(t *testing.T) {
 	first, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

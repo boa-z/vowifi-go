@@ -1,6 +1,10 @@
 package e911
 
 import (
+	"bytes"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +62,33 @@ func TestBuildEmergencySIPRequestInfoUsesIMSHeadersAndGeoURI(t *testing.T) {
 	}
 	if headers["Geolocation-Routing"] != "yes" {
 		t.Fatalf("Geolocation-Routing=%q", headers["Geolocation-Routing"])
+	}
+}
+
+func TestBuildEmergencySIPRequestInfoReferencesPIDFLOBodyByCID(t *testing.T) {
+	pidfLO := []byte("<presence/>")
+	info := BuildEmergencySIPRequestInfo(EmergencySIPHeaderConfig{
+		ServiceURN:         "fire",
+		PIDFLOContentID:    "location-inline",
+		PIDFLOBody:         pidfLO,
+		GeolocationRouting: true,
+		Address: EmergencyAddress{
+			Latitude:  "47.6205",
+			Longitude: "-122.3493",
+		},
+	})
+	if info.Headers["Geolocation"] != "<cid:location-inline>;inserted-by=endpoint" {
+		t.Fatalf("Geolocation=%q", info.Headers["Geolocation"])
+	}
+	if info.Headers["Geolocation-Routing"] != GeolocationRoutingYes {
+		t.Fatalf("Geolocation-Routing=%q", info.Headers["Geolocation-Routing"])
+	}
+	if info.PIDFLOContentID != "location-inline" || string(info.PIDFLOBody) != "<presence/>" {
+		t.Fatalf("PIDF-LO info=%+v body=%q", info, info.PIDFLOBody)
+	}
+	pidfLO[0] = '['
+	if string(info.PIDFLOBody) != "<presence/>" {
+		t.Fatalf("PIDF-LO body should be copied, got %q", info.PIDFLOBody)
 	}
 }
 
@@ -185,6 +216,73 @@ func TestBuildAndParseEmergencyPIDFLO(t *testing.T) {
 		address.StreetSuffix != "St" || address.LocationDescription != "Lobby" ||
 		address.PlaceType != "office" {
 		t.Fatalf("address=%+v fields=%+v", address, address.Fields)
+	}
+}
+
+func TestBuildEmergencyPIDFLOMultipartBody(t *testing.T) {
+	pidfLO, err := BuildEmergencyPIDFLO(EmergencyPIDFLOConfig{
+		Entity: "pres:device@example.test",
+		Address: EmergencyAddress{
+			Latitude:  "47.6205",
+			Longitude: "-122.3493",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildEmergencyPIDFLO() error = %v", err)
+	}
+	contentType, body, err := BuildEmergencyPIDFLOMultipartBody([]byte("v=0\r\n"), pidfLO, EmergencyMultipartRelatedConfig{
+		Boundary:        "e911-test-boundary",
+		SDPContentID:    "sdp-1",
+		PIDFLOContentID: "location-1@example.test",
+	})
+	if err != nil {
+		t.Fatalf("BuildEmergencyPIDFLOMultipartBody() error = %v", err)
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatalf("ParseMediaType(%q) error = %v", contentType, err)
+	}
+	if mediaType != EmergencyMultipartRelatedContentType ||
+		params["boundary"] != "e911-test-boundary" ||
+		params["type"] != EmergencySDPContentType ||
+		params["start"] != "<sdp-1>" {
+		t.Fatalf("multipart content type=%q params=%+v", mediaType, params)
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	part, err := reader.NextPart()
+	if err != nil {
+		t.Fatalf("first multipart part error = %v", err)
+	}
+	firstBody, err := io.ReadAll(part)
+	if err != nil {
+		t.Fatalf("read first multipart part error = %v", err)
+	}
+	if part.Header.Get("Content-Type") != EmergencySDPContentType ||
+		part.Header.Get("Content-ID") != "<sdp-1>" ||
+		part.Header.Get("Content-Disposition") != "session;handling=required" ||
+		string(firstBody) != "v=0\r\n" {
+		t.Fatalf("first part headers=%+v body=%q", part.Header, firstBody)
+	}
+
+	part, err = reader.NextPart()
+	if err != nil {
+		t.Fatalf("second multipart part error = %v", err)
+	}
+	secondBody, err := io.ReadAll(part)
+	if err != nil {
+		t.Fatalf("read second multipart part error = %v", err)
+	}
+	if part.Header.Get("Content-Type") != EmergencyPIDFLOContentType ||
+		part.Header.Get("Content-ID") != "<location-1@example.test>" ||
+		part.Header.Get("Content-Disposition") != "by-reference;handling=optional" {
+		t.Fatalf("second part headers=%+v", part.Header)
+	}
+	if _, err := ParseEmergencyPIDFLO(secondBody); err != nil {
+		t.Fatalf("second part PIDF-LO parse error = %v\n%s", err, secondBody)
+	}
+	if _, err := reader.NextPart(); err != io.EOF {
+		t.Fatalf("extra multipart part err=%v", err)
 	}
 }
 

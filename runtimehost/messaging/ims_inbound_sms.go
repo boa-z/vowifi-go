@@ -62,6 +62,14 @@ type smsConcatState struct {
 }
 
 func (s *Service) HandleIMSMessage(ctx context.Context, msg IMSMessageRequest) (IMSMessageResult, error) {
+	body, consumedTransferEncoding, err := decodeIMSContentTransferEncoding(msg.Headers, msg.Body)
+	if err != nil {
+		return IMSMessageResult{StatusCode: 400, Reason: err.Error()}, err
+	}
+	if consumedTransferEncoding {
+		msg.Body = body
+		msg.Headers = omitIMSMessageHeader(msg.Headers, imsContentTransferEncodingHeader)
+	}
 	contentType := normalizedIMSMessageContentType(msg.ContentType)
 	if strings.HasPrefix(contentType, "multipart/") {
 		return s.handleIMSMultipartMessage(ctx, msg)
@@ -206,6 +214,28 @@ func appendIMSMessageHeaderValues(headers map[string][]string, key string, value
 		}
 	}
 	headers[key] = append([]string(nil), values...)
+}
+
+func omitIMSMessageHeader(headers map[string][]string, key string) map[string][]string {
+	if len(headers) == 0 {
+		return headers
+	}
+	out := make(map[string][]string, len(headers))
+	removed := false
+	for candidate, values := range headers {
+		if strings.EqualFold(strings.TrimSpace(candidate), key) {
+			removed = true
+			continue
+		}
+		out[candidate] = append([]string(nil), values...)
+	}
+	if !removed {
+		return headers
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *Service) handleIMSCPIMMessage(ctx context.Context, msg IMSMessageRequest) (IMSMessageResult, error) {

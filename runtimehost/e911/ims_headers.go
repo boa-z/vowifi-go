@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,17 +13,22 @@ import (
 const (
 	DefaultEmergencyServiceURN = "urn:service:sos"
 
-	IMSMMTelServiceIdentifier  = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
-	IMSEmergencyAcceptContact  = `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";require;explicit`
-	EmergencyPIDFLOContentType = "application/pidf+xml"
-	GeolocationRoutingYes      = "yes"
-	GeolocationRoutingNo       = "no"
+	IMSMMTelServiceIdentifier            = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
+	IMSEmergencyAcceptContact            = `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";require;explicit`
+	EmergencySDPContentType              = "application/sdp"
+	EmergencyPIDFLOContentType           = "application/pidf+xml"
+	EmergencyMultipartRelatedContentType = "multipart/related"
+	GeolocationRoutingYes                = "yes"
+	GeolocationRoutingNo                 = "no"
 )
 
 const (
-	defaultEmergencyPIDFLOEntity = "pres:anonymous@invalid"
-	defaultEmergencyPIDFLOTuple  = "e911-location"
-	defaultEmergencyPIDFLOMethod = "Manual"
+	defaultEmergencyPIDFLOEntity      = "pres:anonymous@invalid"
+	defaultEmergencyPIDFLOTuple       = "e911-location"
+	defaultEmergencyPIDFLOMethod      = "Manual"
+	defaultEmergencyPIDFLOContentID   = "location-1"
+	defaultEmergencySDPContentID      = "sdp"
+	defaultEmergencyMultipartBoundary = "e911-pidf-lo"
 )
 
 type EmergencyServiceCategory uint8
@@ -63,19 +69,29 @@ type EmergencyPIDFLOUsageRules struct {
 	NoteWell              string
 }
 
+type EmergencyMultipartRelatedConfig struct {
+	Boundary        string
+	SDPContentID    string
+	PIDFLOContentID string
+}
+
 type EmergencySIPHeaderConfig struct {
 	ServiceURN         string
 	AccessNetworkInfo  EmergencyAccessNetworkInfo
 	GeolocationURI     string
 	Address            EmergencyAddress
 	GeolocationRouting bool
+	PIDFLOContentID    string
+	PIDFLOBody         []byte
 }
 
 type EmergencySIPRequestInfo struct {
-	RequestURI string
-	Headers    map[string]string
-	Routes     []EmergencyRoute
-	RouteSet   []string
+	RequestURI      string
+	Headers         map[string]string
+	Routes          []EmergencyRoute
+	RouteSet        []string
+	PIDFLOContentID string
+	PIDFLOBody      []byte
 }
 
 func NormalizeEmergencyServiceURN(s string) string {
@@ -147,8 +163,10 @@ func BuildEmergencySIPHeaders(cfg EmergencySIPHeaderConfig) map[string]string {
 
 func BuildEmergencySIPRequestInfo(cfg EmergencySIPHeaderConfig) EmergencySIPRequestInfo {
 	return EmergencySIPRequestInfo{
-		RequestURI: EmergencyRequestURI(cfg.ServiceURN),
-		Headers:    BuildEmergencySIPHeaders(cfg),
+		RequestURI:      EmergencyRequestURI(cfg.ServiceURN),
+		Headers:         BuildEmergencySIPHeaders(cfg),
+		PIDFLOContentID: strings.TrimSpace(cfg.PIDFLOContentID),
+		PIDFLOBody:      append([]byte(nil), cfg.PIDFLOBody...),
 	}
 }
 
@@ -310,6 +328,46 @@ func BuildEmergencyPIDFLOWithUsageRules(cfg EmergencyPIDFLOConfig, rules Emergen
 	return body.Bytes(), nil
 }
 
+func BuildEmergencyPIDFLOMultipartBody(sdp, pidfLO []byte, cfg EmergencyMultipartRelatedConfig) (string, []byte, error) {
+	if len(pidfLO) == 0 {
+		return "", nil, errors.New("e911 multipart body requires pidf-lo body")
+	}
+	sdpContentID, err := normalizeEmergencyContentID(cfg.SDPContentID, defaultEmergencySDPContentID)
+	if err != nil {
+		return "", nil, err
+	}
+	pidfContentID, err := normalizeEmergencyContentID(cfg.PIDFLOContentID, defaultEmergencyPIDFLOContentID)
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.EqualFold(sdpContentID, pidfContentID) {
+		return "", nil, errors.New("e911 multipart body requires distinct content ids")
+	}
+	boundary := strings.TrimSpace(cfg.Boundary)
+	if boundary == "" {
+		boundary = chooseEmergencyMultipartBoundary(sdp, pidfLO)
+	}
+	if err := validateEmergencyMultipartBoundary(boundary); err != nil {
+		return "", nil, err
+	}
+	if emergencyMultipartBoundaryCollides(boundary, sdp, pidfLO) {
+		return "", nil, errors.New("e911 multipart boundary collides with body")
+	}
+
+	var body bytes.Buffer
+	appendEmergencyMultipartPart(&body, boundary, EmergencySDPContentType, sdpContentID, "session;handling=required", sdp)
+	appendEmergencyMultipartPart(&body, boundary, EmergencyPIDFLOContentType, pidfContentID, "by-reference;handling=optional", pidfLO)
+	body.WriteString("--")
+	body.WriteString(boundary)
+	body.WriteString("--\r\n")
+
+	contentType := EmergencyMultipartRelatedContentType +
+		`;boundary=` + boundary +
+		`;type="` + EmergencySDPContentType + `"` +
+		`;start="<` + sdpContentID + `>"`
+	return contentType, body.Bytes(), nil
+}
+
 func ParseEmergencyPIDFLO(body []byte) (EmergencyAddress, error) {
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	var stack []pidfLOElement
@@ -452,6 +510,11 @@ func containsSIPRoute(routes []string, route string) bool {
 func emergencyGeolocationHeader(cfg EmergencySIPHeaderConfig) string {
 	if uri := strings.TrimSpace(cfg.GeolocationURI); uri != "" {
 		return formatGeolocationURI(uri)
+	}
+	if len(cfg.PIDFLOBody) > 0 || strings.TrimSpace(cfg.PIDFLOContentID) != "" {
+		if contentID := emergencyContentIDForHeader(cfg.PIDFLOContentID, defaultEmergencyPIDFLOContentID); contentID != "" {
+			return formatGeolocationURI("cid:" + contentID)
+		}
 	}
 	lat := strings.TrimSpace(cfg.Address.Latitude)
 	lon := strings.TrimSpace(cfg.Address.Longitude)
@@ -829,6 +892,87 @@ func collectPIDFLOGeodeticPosition(text string, out *entitlementResult) {
 	if out.EmergencyAddress["longitude"] == "" {
 		out.EmergencyAddress["longitude"] = parts[1]
 	}
+}
+
+func appendEmergencyMultipartPart(dst *bytes.Buffer, boundary, contentType, contentID, disposition string, body []byte) {
+	dst.WriteString("--")
+	dst.WriteString(boundary)
+	dst.WriteString("\r\nContent-Type: ")
+	dst.WriteString(contentType)
+	dst.WriteString("\r\nContent-ID: <")
+	dst.WriteString(contentID)
+	dst.WriteString(">")
+	if disposition != "" {
+		dst.WriteString("\r\nContent-Disposition: ")
+		dst.WriteString(disposition)
+	}
+	dst.WriteString("\r\n\r\n")
+	dst.Write(body)
+	dst.WriteString("\r\n")
+}
+
+func chooseEmergencyMultipartBoundary(bodies ...[]byte) string {
+	boundary := defaultEmergencyMultipartBoundary
+	for i := 1; emergencyMultipartBoundaryCollides(boundary, bodies...); i++ {
+		boundary = defaultEmergencyMultipartBoundary + "-" + strconv.Itoa(i)
+	}
+	return boundary
+}
+
+func emergencyMultipartBoundaryCollides(boundary string, bodies ...[]byte) bool {
+	marker := []byte("--" + boundary)
+	for _, body := range bodies {
+		if bytes.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeEmergencyContentID(value, fallback string) (string, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "cid:") {
+		value = strings.TrimSpace(value[4:])
+	}
+	if strings.HasPrefix(value, "<") || strings.HasSuffix(value, ">") {
+		if len(value) < 2 || value[0] != '<' || value[len(value)-1] != '>' {
+			return "", errors.New("invalid e911 content-id")
+		}
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	if value == "" {
+		value = fallback
+	}
+	if value == "" || strings.ContainsAny(value, "\r\n<> \t") {
+		return "", errors.New("invalid e911 content-id")
+	}
+	return value, nil
+}
+
+func emergencyContentIDForHeader(value, fallback string) string {
+	contentID, err := normalizeEmergencyContentID(value, fallback)
+	if err != nil {
+		return ""
+	}
+	return contentID
+}
+
+func validateEmergencyMultipartBoundary(boundary string) error {
+	if boundary == "" || len(boundary) > 70 {
+		return errors.New("invalid e911 multipart boundary")
+	}
+	for _, r := range boundary {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '\'', '(', ')', '+', '_', ',', '-', '.', '/', ':', '=', '?':
+			continue
+		default:
+			return errors.New("invalid e911 multipart boundary")
+		}
+	}
+	return nil
 }
 
 func quoteSIPParamValue(value string) string {
