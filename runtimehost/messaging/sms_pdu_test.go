@@ -19,6 +19,61 @@ func TestBuildSMSSubmitTPDUGSM7(t *testing.T) {
 	}
 }
 
+func TestBuildSMSSubmitTPDURelativeValidityPeriod(t *testing.T) {
+	tpdu, err := BuildSMSSubmitTPDU("+18005551212", SMSPart{Text: "hello", Encoding: "gsm7", ValidityPeriod: time.Hour}, 1)
+	if err != nil {
+		t.Fatalf("BuildSMSSubmitTPDU() error = %v", err)
+	}
+	got := strings.ToUpper(hex.EncodeToString(tpdu))
+	want := "11010B918100551512F200000B05E8329BFD06"
+	if got != want {
+		t.Fatalf("TPDU=%s want %s", got, want)
+	}
+	if tpdu[0]&0x18 != 0x10 || tpdu[12] != 0x0b || tpdu[13] != 5 {
+		t.Fatalf("first=0x%02x VP=0x%02x UDL=%d TPDU=%x", tpdu[0], tpdu[12], tpdu[13], tpdu)
+	}
+}
+
+func TestEncodeSMSRelativeValidityPeriod(t *testing.T) {
+	tests := []struct {
+		name     string
+		validity time.Duration
+		want     byte
+		wantSet  bool
+		wantErr  bool
+	}{
+		{name: "unset", validity: 0, wantSet: false},
+		{name: "round up sub five minutes", validity: time.Nanosecond, want: 0x00, wantSet: true},
+		{name: "five minutes", validity: 5 * time.Minute, want: 0x00, wantSet: true},
+		{name: "twelve hours", validity: 12 * time.Hour, want: 0x8f, wantSet: true},
+		{name: "after twelve hours", validity: 12*time.Hour + time.Nanosecond, want: 0x90, wantSet: true},
+		{name: "one day", validity: 24 * time.Hour, want: 0xa7, wantSet: true},
+		{name: "after one day", validity: 24*time.Hour + time.Nanosecond, want: 0xa8, wantSet: true},
+		{name: "thirty days", validity: 30 * 24 * time.Hour, want: 0xc4, wantSet: true},
+		{name: "thirty one days", validity: 31 * 24 * time.Hour, want: 0xc5, wantSet: true},
+		{name: "sixty three weeks", validity: 63 * 7 * 24 * time.Hour, want: 0xff, wantSet: true},
+		{name: "negative", validity: -time.Second, wantErr: true},
+		{name: "too large", validity: 64 * 7 * 24 * time.Hour, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, gotSet, err := encodeSMSRelativeValidityPeriod(tt.validity)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("encodeSMSRelativeValidityPeriod() err=nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("encodeSMSRelativeValidityPeriod() error = %v", err)
+			}
+			if got != tt.want || gotSet != tt.wantSet {
+				t.Fatalf("encodeSMSRelativeValidityPeriod()=(0x%02x,%v), want (0x%02x,%v)", got, gotSet, tt.want, tt.wantSet)
+			}
+		})
+	}
+}
+
 func TestBuildSMSSubmitTPDUGSM7ExtendedCharacters(t *testing.T) {
 	text := "^{}\\[~]|€\f"
 	septets, err := encodeGSM7(text)

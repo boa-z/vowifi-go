@@ -28,9 +28,10 @@ func WithSuppressSendTGSuccess(ctx context.Context) context.Context {
 }
 
 type SendOptions struct {
-	Encoding      string
-	ConcatRef     int
-	ConcatRefBits int
+	Encoding       string
+	ValidityPeriod time.Duration
+	ConcatRef      int
+	ConcatRefBits  int
 }
 
 type SendOutcome struct {
@@ -76,6 +77,7 @@ type SMSPart struct {
 	Text                string
 	Encoding            string
 	UDH                 []byte
+	ValidityPeriod      time.Duration
 	ConcatRef           int
 	ConcatRefBits       int
 	RequestStatusReport bool
@@ -452,10 +454,13 @@ func segmentSMS(text string, opts SendOptions) ([]SMSPart, error) {
 	if text == "" {
 		return nil, nil
 	}
+	if _, _, err := encodeSMSRelativeValidityPeriod(opts.ValidityPeriod); err != nil {
+		return nil, err
+	}
 	enc := normalizeEncoding(text, opts.Encoding)
 	single, concat := smsPartLimitsForUDH(enc, concatUDHLength(normalizeSMSConcatRefBits(opts.ConcatRef, opts.ConcatRefBits)))
 	if messageLen(text, enc) <= single {
-		return []SMSPart{{PartNo: 1, TotalParts: 1, Text: text, Encoding: enc}}, nil
+		return []SMSPart{{PartNo: 1, TotalParts: 1, Text: text, Encoding: enc, ValidityPeriod: opts.ValidityPeriod}}, nil
 	}
 	refBits, err := validateSMSConcatOptions(opts.ConcatRef, opts.ConcatRefBits)
 	if err != nil {
@@ -481,7 +486,7 @@ func segmentSMS(text string, opts SendOptions) ([]SMSPart, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, SMSPart{PartNo: partNo, TotalParts: total, Text: chunk, Encoding: enc, UDH: udh, ConcatRef: ref, ConcatRefBits: refBits})
+		out = append(out, SMSPart{PartNo: partNo, TotalParts: total, Text: chunk, Encoding: enc, UDH: udh, ValidityPeriod: opts.ValidityPeriod, ConcatRef: ref, ConcatRefBits: refBits})
 		remaining = rest
 	}
 	for i := range out {

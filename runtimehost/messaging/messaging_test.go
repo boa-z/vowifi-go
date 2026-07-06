@@ -114,6 +114,27 @@ func TestSendSMSWithTransportStoresEveryPart(t *testing.T) {
 	}
 }
 
+func TestSendSMSWithOptionsPropagatesValidityPeriod(t *testing.T) {
+	transport := &fakeSMSTransport{}
+	svc := NewService("dev-1", "310280233641503", nil, nil)
+	svc.SetSMSTransport(transport)
+
+	out, err := svc.SendSMSWithOptions(context.Background(), "+18005551212", strings.Repeat("a", 161), SendOptions{
+		ValidityPeriod: 6 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("SendSMSWithOptions() error = %v", err)
+	}
+	if out.PartsTotal != 2 || len(transport.requests) != 2 {
+		t.Fatalf("out=%+v requests=%+v", out, transport.requests)
+	}
+	for _, req := range transport.requests {
+		if req.Part.ValidityPeriod != 6*time.Hour {
+			t.Fatalf("part validity=%s want 6h part=%+v", req.Part.ValidityPeriod, req.Part)
+		}
+	}
+}
+
 func TestSendSMSWithTransportFailureMarksDeliveryFailed(t *testing.T) {
 	store := &fakeDeliveryStore{}
 	transport := &fakeSMSTransport{failPart: 2}
@@ -140,6 +161,16 @@ func TestSendSMSWithOptionsRejectsInvalidConcatReference(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "8-bit concat reference") {
 		t.Fatalf("SendSMSWithOptions() err=%v, want 8-bit concat reference error", err)
+	}
+}
+
+func TestSendSMSWithOptionsRejectsInvalidValidityPeriod(t *testing.T) {
+	svc := NewService("dev-1", "310280233641503", nil, nil)
+	_, err := svc.SendSMSWithOptions(context.Background(), "+18005551212", "hello", SendOptions{
+		ValidityPeriod: 64 * 7 * 24 * time.Hour,
+	})
+	if err == nil || !strings.Contains(err.Error(), "validity period") {
+		t.Fatalf("SendSMSWithOptions() err=%v, want validity period error", err)
 	}
 }
 

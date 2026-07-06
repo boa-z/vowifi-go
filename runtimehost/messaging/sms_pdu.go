@@ -75,16 +75,76 @@ func BuildSMSSubmitTPDU(to string, part SMSPart, mr byte) ([]byte, error) {
 	if len(udh) > 0 {
 		firstOctet |= 0x40
 	}
+	vp, hasValidityPeriod, err := encodeSMSRelativeValidityPeriod(part.ValidityPeriod)
+	if err != nil {
+		return nil, err
+	}
+	if hasValidityPeriod {
+		firstOctet |= 0x10
+	}
 	userData, udl, dcs, err := encodeSMSUserData(part.Text, encoding, udh)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, 7+len(bcd)+len(userData))
+	out := make([]byte, 0, 8+len(bcd)+len(userData))
 	out = append(out, firstOctet, mr, byte(digits), toa)
 	out = append(out, bcd...)
-	out = append(out, 0x00, dcs, byte(udl))
+	out = append(out, 0x00, dcs)
+	if hasValidityPeriod {
+		out = append(out, vp)
+	}
+	out = append(out, byte(udl))
 	out = append(out, userData...)
 	return out, nil
+}
+
+func encodeSMSRelativeValidityPeriod(validity time.Duration) (byte, bool, error) {
+	if validity == 0 {
+		return 0, false, nil
+	}
+	if validity < 0 {
+		return 0, false, fmt.Errorf("sms validity period is negative: %s", validity)
+	}
+	const (
+		fiveMinutes  = 5 * time.Minute
+		thirtyMinute = 30 * time.Minute
+		twelveHours  = 12 * time.Hour
+		oneDay       = 24 * time.Hour
+		oneWeek      = 7 * oneDay
+		maxValidity  = 63 * oneWeek
+	)
+	if validity > maxValidity {
+		return 0, false, fmt.Errorf("sms validity period %s exceeds maximum %s", validity, maxValidity)
+	}
+	if validity <= twelveHours {
+		return byte(ceilDuration(validity, fiveMinutes) - 1), true, nil
+	}
+	if validity <= oneDay {
+		steps := ceilDuration(validity-twelveHours, thirtyMinute)
+		if steps < 1 {
+			steps = 1
+		}
+		return byte(143 + steps), true, nil
+	}
+	if validity <= 30*oneDay {
+		days := ceilDuration(validity, oneDay)
+		if days < 2 {
+			days = 2
+		}
+		return byte(166 + days), true, nil
+	}
+	weeks := ceilDuration(validity, oneWeek)
+	if weeks < 5 {
+		weeks = 5
+	}
+	return byte(192 + weeks), true, nil
+}
+
+func ceilDuration(value, unit time.Duration) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return int64((value + unit - 1) / unit)
 }
 
 func BuildSMSRPData(rpMR byte, smsc string, tpdu []byte) ([]byte, error) {
