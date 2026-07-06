@@ -139,6 +139,7 @@ func (a *IMSInboundAgent) HandleInboundInvite(ctx context.Context, req InboundCa
 	var invite voiceclient.SIPRequestMessage
 	var resp voiceclient.SIPResponse
 	retriedSessionInterval := false
+	redirectRetries := 0
 	var provisionalAnswer InboundCallResult
 	for {
 		invite, err = voiceclient.BuildInviteRequest(cfg, offerBody)
@@ -169,6 +170,17 @@ func (a *IMSInboundAgent) HandleInboundInvite(ctx context.Context, req InboundCa
 				}
 				cfg = retryCfg
 				retriedSessionInterval = true
+				continue
+			}
+		}
+		if redirectRetries < maxIMSInviteRedirects {
+			if retryCfg, ok := retryDialogConfigForRedirect(cfg, resp, nextInboundClientCSeq(cfg.CSeq)); ok {
+				if err := a.ackRejectedClientInvite(ctx, cfg, invite, resp); err != nil {
+					a.deleteInboundDialog(callID)
+					return InboundCallResult{Accepted: false, StatusCode: 500, Reason: "client INVITE redirect ACK failed"}, err
+				}
+				cfg = retryCfg
+				redirectRetries++
 				continue
 			}
 		}
@@ -268,6 +280,7 @@ func (a *IMSInboundAgent) handleInboundReinvite(ctx context.Context, req Inbound
 	var resp voiceclient.SIPResponse
 	var err error
 	retriedSessionInterval := false
+	redirectRetries := 0
 	var provisionalAnswer InboundCallResult
 	for {
 		invite, err = voiceclient.BuildInviteRequest(cfg, body)
@@ -297,6 +310,16 @@ func (a *IMSInboundAgent) handleInboundReinvite(ctx context.Context, req Inbound
 				}
 				cfg = retryCfg
 				retriedSessionInterval = true
+				continue
+			}
+		}
+		if redirectRetries < maxIMSInviteRedirects {
+			if retryCfg, ok := retryDialogConfigForRedirect(cfg, resp, nextInboundClientCSeq(cfg.CSeq)); ok {
+				if err := a.ackRejectedClientInvite(ctx, cfg, invite, resp); err != nil {
+					return InboundCallResult{Accepted: false, StatusCode: 500, Reason: "client re-INVITE redirect ACK failed"}, err
+				}
+				cfg = retryCfg
+				redirectRetries++
 				continue
 			}
 		}
