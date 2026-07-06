@@ -525,6 +525,57 @@ func TestParseSMSDeliverTPDUGSM7WithNationalLanguageLockingShift(t *testing.T) {
 	}
 }
 
+func TestParseSMSDeliverTPDUWithSpecialMessageIndicationUDH(t *testing.T) {
+	tpdu := deliverTPDUWithUserData(t, []byte{0x04, 0x01, 0x02, 0x81, 0x04}, "mail", 0, 0)
+	deliver, err := ParseSMSDeliverTPDU(tpdu)
+	if err != nil {
+		t.Fatalf("ParseSMSDeliverTPDU() error = %v", err)
+	}
+	header := deliver.UserDataHeaderInfo
+	if deliver.Text != "mail" || len(header.SpecialMessageIndications) != 1 {
+		t.Fatalf("deliver=%+v header=%+v", deliver, header)
+	}
+	indication := header.SpecialMessageIndications[0]
+	if indication.Raw != 0x81 || !indication.StoreMessage || indication.ProfileID != 1 || indication.MessageType != "fax" || indication.Count != 4 || !indication.Active || indication.ReservedType {
+		t.Fatalf("special indication=%+v", indication)
+	}
+}
+
+func TestParseSMSUDHInfoSpecialMessageIndicationTypes(t *testing.T) {
+	header := parseSMSUDHInfo([]byte{0x08, 0x01, 0x02, 0x07, 0xff, 0x01, 0x02, 0x0b, 0x01})
+	if len(header.SpecialMessageIndications) != 2 {
+		t.Fatalf("special indications=%+v", header.SpecialMessageIndications)
+	}
+	video := header.SpecialMessageIndications[0]
+	if video.MessageType != "video" || video.ReservedType || video.BasicType != 3 || video.ExtendedType != 1 || video.Count != 255 {
+		t.Fatalf("video indication=%+v", video)
+	}
+	reserved := header.SpecialMessageIndications[1]
+	if reserved.MessageType != "reserved" || !reserved.ReservedType || reserved.Count != 1 {
+		t.Fatalf("reserved indication=%+v", reserved)
+	}
+}
+
+func TestParseSMSUDHInfoSMSCControlSourceAndEmailHeader(t *testing.T) {
+	header := parseSMSUDHInfo([]byte{0x0c, 0x06, 0x01, 0xcf, 0x07, 0x01, 0x03, 0x07, 0x01, 0x09, 0x20, 0x01, 0x12})
+	if !header.HasSMSCControl {
+		t.Fatalf("missing SMSC control: %+v", header)
+	}
+	control := header.SMSCControl
+	if control.Raw != 0xcf || !control.StatusReportTransactionCompleted || !control.StatusReportPermanentError || !control.StatusReportTemporaryErrorNoMoreAttempts || !control.StatusReportTemporaryErrorMoreAttempts || !control.CancelSRRForRemainingConcatParts || !control.IncludeOriginalUDHInStatusReport || control.ReservedBits != 0 {
+		t.Fatalf("SMSC control=%+v", control)
+	}
+	if len(header.SourceIndicators) != 2 || header.SourceIndicators[0].Value != 3 || header.SourceIndicators[0].Description != "smsc" || header.SourceIndicators[1].Description != "reserved" {
+		t.Fatalf("source indicators=%+v", header.SourceIndicators)
+	}
+	if !header.HasRFC822EmailHeader || header.RFC822EmailHeaderLength != 18 {
+		t.Fatalf("email header metadata=%+v", header)
+	}
+	if len(header.Elements) != 4 {
+		t.Fatalf("elements=%+v", header.Elements)
+	}
+}
+
 func TestParseSMSUDHInfoIgnoresReservedNationalLanguage(t *testing.T) {
 	header := parseSMSUDHInfo([]byte{0x06, 0x24, 0x01, 0x0e, 0x25, 0x01, 0x00})
 	if header.HasSingleShift || header.SingleShiftLang != 0 || header.HasLockingShift || header.LockingShiftLang != 0 {

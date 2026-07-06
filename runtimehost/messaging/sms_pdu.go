@@ -45,18 +45,52 @@ type SMSUDHElement struct {
 	Data       []byte
 }
 
+type SMSSpecialMessageIndication struct {
+	Raw          byte
+	StoreMessage bool
+	ProfileID    int
+	BasicType    int
+	ExtendedType int
+	MessageType  string
+	Count        int
+	Active       bool
+	ReservedType bool
+}
+
+type SMSSMSCControlParameters struct {
+	Raw                                      byte
+	StatusReportTransactionCompleted         bool
+	StatusReportPermanentError               bool
+	StatusReportTemporaryErrorNoMoreAttempts bool
+	StatusReportTemporaryErrorMoreAttempts   bool
+	CancelSRRForRemainingConcatParts         bool
+	IncludeOriginalUDHInStatusReport         bool
+	ReservedBits                             byte
+}
+
+type SMSUDHSourceIndicator struct {
+	Value       int
+	Description string
+}
+
 type SMSUserDataHeaderInfo struct {
-	Raw              []byte
-	Elements         []SMSUDHElement
-	Concat           SMSConcatInfo
-	HasPorts         bool
-	DestinationPort  int
-	SourcePort       int
-	PortBits         int
-	HasSingleShift   bool
-	SingleShiftLang  int
-	HasLockingShift  bool
-	LockingShiftLang int
+	Raw                       []byte
+	Elements                  []SMSUDHElement
+	Concat                    SMSConcatInfo
+	HasPorts                  bool
+	DestinationPort           int
+	SourcePort                int
+	PortBits                  int
+	SpecialMessageIndications []SMSSpecialMessageIndication
+	HasSMSCControl            bool
+	SMSCControl               SMSSMSCControlParameters
+	SourceIndicators          []SMSUDHSourceIndicator
+	HasRFC822EmailHeader      bool
+	RFC822EmailHeaderLength   int
+	HasSingleShift            bool
+	SingleShiftLang           int
+	HasLockingShift           bool
+	LockingShiftLang          int
 }
 
 type SMSDataCodingInfo struct {
@@ -1149,6 +1183,10 @@ func parseSMSUDHInfo(udh []byte) SMSUserDataHeaderInfo {
 			if len(ie) == 3 && ie[1] > 1 {
 				info.Concat = SMSConcatInfo{IsConcat: true, Ref: int(ie[0]), RefBits: 8, Total: int(ie[1]), Seq: int(ie[2])}
 			}
+		case 0x01:
+			if len(ie) == 2 {
+				info.SpecialMessageIndications = append(info.SpecialMessageIndications, parseSMSSpecialMessageIndication(ie))
+			}
 		case 0x04:
 			if len(ie) == 2 {
 				info.HasPorts = true
@@ -1167,6 +1205,21 @@ func parseSMSUDHInfo(udh []byte) SMSUserDataHeaderInfo {
 			if len(ie) == 4 && ie[2] > 1 {
 				info.Concat = SMSConcatInfo{IsConcat: true, Ref: int(ie[0])<<8 | int(ie[1]), RefBits: 16, Total: int(ie[2]), Seq: int(ie[3])}
 			}
+		case 0x06:
+			if len(ie) == 1 {
+				info.HasSMSCControl = true
+				info.SMSCControl = parseSMSSMSCControlParameters(ie[0])
+			}
+		case 0x07:
+			if len(ie) == 1 {
+				value := int(ie[0])
+				info.SourceIndicators = append(info.SourceIndicators, SMSUDHSourceIndicator{Value: value, Description: smsUDHSourceIndicatorDescription(value)})
+			}
+		case 0x20:
+			if len(ie) == 1 {
+				info.HasRFC822EmailHeader = true
+				info.RFC822EmailHeaderLength = int(ie[0])
+			}
 		case smsUDHIEINationalLanguageSingleShift:
 			if len(ie) == 1 && smsNationalLanguageIdentifierKnown(int(ie[0])) {
 				info.HasSingleShift = true
@@ -1181,6 +1234,67 @@ func parseSMSUDHInfo(udh []byte) SMSUserDataHeaderInfo {
 		i += iedl
 	}
 	return info
+}
+
+func parseSMSSpecialMessageIndication(data []byte) SMSSpecialMessageIndication {
+	raw := data[0]
+	count := int(data[1])
+	indication := SMSSpecialMessageIndication{
+		Raw:          raw,
+		StoreMessage: raw&0x80 != 0,
+		ProfileID:    int((raw>>5)&0x03) + 1,
+		BasicType:    int(raw & 0x03),
+		ExtendedType: int((raw >> 2) & 0x07),
+		Count:        count,
+		Active:       count > 0,
+	}
+	indication.MessageType, indication.ReservedType = smsSpecialMessageIndicationType(indication.BasicType, indication.ExtendedType)
+	return indication
+}
+
+func smsSpecialMessageIndicationType(basic, extended int) (string, bool) {
+	if extended == 0 {
+		switch basic {
+		case 0:
+			return "voicemail", false
+		case 1:
+			return "fax", false
+		case 2:
+			return "email", false
+		default:
+			return "other", false
+		}
+	}
+	if basic == 3 && extended == 1 {
+		return "video", false
+	}
+	return "reserved", true
+}
+
+func parseSMSSMSCControlParameters(raw byte) SMSSMSCControlParameters {
+	return SMSSMSCControlParameters{
+		Raw:                                      raw,
+		StatusReportTransactionCompleted:         raw&0x01 != 0,
+		StatusReportPermanentError:               raw&0x02 != 0,
+		StatusReportTemporaryErrorNoMoreAttempts: raw&0x04 != 0,
+		StatusReportTemporaryErrorMoreAttempts:   raw&0x08 != 0,
+		CancelSRRForRemainingConcatParts:         raw&0x40 != 0,
+		IncludeOriginalUDHInStatusReport:         raw&0x80 != 0,
+		ReservedBits:                             raw & 0x30,
+	}
+}
+
+func smsUDHSourceIndicatorDescription(value int) string {
+	switch value {
+	case 1:
+		return "original-sender"
+	case 2:
+		return "original-receiver"
+	case 3:
+		return "smsc"
+	default:
+		return "reserved"
+	}
 }
 
 func smsDCSAlphabet(dcs byte) string {

@@ -576,6 +576,31 @@ func TestHandleIMSMessagePreservesUDHPortMetadata(t *testing.T) {
 	}
 }
 
+func TestHandleIMSMessagePreservesUDHMessageIndicationMetadata(t *testing.T) {
+	svc := NewService("dev-1", "310280233641503", nil, nil)
+	tpdu := deliverTPDUWithUserData(t, []byte{0x07, 0x01, 0x02, 0x80, 0x02, 0x06, 0x01, 0x83}, "vm", 0, 0)
+
+	result, err := svc.HandleIMSMessage(context.Background(), IMSMessageRequest{
+		FromURI:     "sip:smsc@ims.example",
+		ToURI:       "sip:user@ims.example",
+		ContentType: IMS3GPPSMSContentType,
+		Body:        imsRPDataBody(0x39, tpdu),
+	})
+	if err != nil {
+		t.Fatalf("HandleIMSMessage() error = %v", err)
+	}
+	if result.Incoming == nil || result.Incoming.Content != "vm" || string(result.ReplyBody) != string(BuildSMSRPAck(0x39)) {
+		t.Fatalf("result=%+v", result)
+	}
+	header := result.Incoming.UserDataHeaderInfo
+	if len(header.SpecialMessageIndications) != 1 || header.SpecialMessageIndications[0].MessageType != "voicemail" || header.SpecialMessageIndications[0].Count != 2 {
+		t.Fatalf("special indications=%+v", header.SpecialMessageIndications)
+	}
+	if !header.HasSMSCControl || !header.SMSCControl.StatusReportTransactionCompleted || !header.SMSCControl.IncludeOriginalUDHInStatusReport {
+		t.Fatalf("SMSC control=%+v", header.SMSCControl)
+	}
+}
+
 func TestHandleIMSMessageReassemblesConcatSMSBeforeDispatch(t *testing.T) {
 	dispatch := &fakeDispatcher{}
 	svc := NewService("dev-1", "310280233641503", nil, dispatch)
