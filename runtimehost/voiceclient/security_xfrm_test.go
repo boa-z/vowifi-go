@@ -125,6 +125,41 @@ func TestBuildIMSSecurityAssociationXFRMInstallPlanDerivesPlanFromAgreement(t *t
 	}
 }
 
+func TestBuildIMSSecurityAssociationXFRMInstallPlanUsesSelectedParameters(t *testing.T) {
+	req := validSecurityXFRMInstallRequest()
+	req.Plan = IMSSecurityAssociationPlan{}
+	req.Agreement = SecurityAgreement{Protocol: DefaultSecurityProtocol}
+	req.LocalEndpoint.Port = 0
+	req.RemoteEndpoint.Port = 0
+	req.SelectedParameters = map[string]string{
+		"alg":    SecurityAlgorithmHMACMD596,
+		"ealg":   SecurityEncryptionAlgorithmAES,
+		"mod":    "transport",
+		"prot":   "ESP",
+		"spi-c":  "3001",
+		"spi-s":  "3002",
+		"port-c": "6062",
+		"port-s": "6063",
+	}
+	installPlan, err := BuildIMSSecurityAssociationXFRMInstallPlan(req)
+	if err != nil {
+		t.Fatalf("BuildIMSSecurityAssociationXFRMInstallPlan() error = %v", err)
+	}
+	ik := securityXFRMHexKey(req.AKA.IK)
+	ck := securityXFRMHexKey(req.AKA.CK)
+	if installPlan.Mode != "transport" || installPlan.Commands[0].Args[10] != "0x00000bba" ||
+		installPlan.Commands[1].Args[10] != "0x00000bb9" {
+		t.Fatalf("install plan=%+v commands=%+v", installPlan, installPlan.Commands)
+	}
+	if got, want := installPlan.Commands[0].Args[15:22], []string{"auth-trunc", "hmac(md5)", ik, "96", "enc", "cbc(aes)", ck}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state auth/enc args=%v, want %v", got, want)
+	}
+	if installPlan.Commands[0].Args[29] != "sport" || installPlan.Commands[0].Args[30] != "6062" ||
+		installPlan.Commands[0].Args[31] != "dport" || installPlan.Commands[0].Args[32] != "6063" {
+		t.Fatalf("state selector args=%v", installPlan.Commands[0].Args)
+	}
+}
+
 func TestBuildIMSSecurityAssociationXFRMInstallPlanSupportsHMACMD5(t *testing.T) {
 	req := validSecurityXFRMInstallRequest()
 	req.Plan.Algorithm = SecurityAlgorithmHMACMD596
@@ -159,6 +194,23 @@ func TestBuildIMSSecurityAssociationXFRMInstallPlanSupportsAESCBC(t *testing.T) 
 	}
 }
 
+func TestBuildIMSSecurityAssociationXFRMInstallPlanNullEncryptionDoesNotNeedCK(t *testing.T) {
+	req := validSecurityXFRMInstallRequest()
+	req.AKA.CK = nil
+	req.Plan.EncryptionAlgorithm = DefaultSecurityEAlg
+	req.Agreement.EncryptionAlgorithm = DefaultSecurityEAlg
+	installPlan, err := BuildIMSSecurityAssociationXFRMInstallPlan(req)
+	if err != nil {
+		t.Fatalf("BuildIMSSecurityAssociationXFRMInstallPlan() error = %v", err)
+	}
+	wantEnc := []string{"enc", "ecb(cipher_null)", "0x"}
+	for i := 0; i < 2; i++ {
+		if got := installPlan.Commands[i].Args[19:22]; !reflect.DeepEqual(got, wantEnc) {
+			t.Fatalf("state command %d enc args=%v, want %v", i, got, wantEnc)
+		}
+	}
+}
+
 func TestBuildIMSSecurityAssociationXFRMInstallPlanRejectsInvalidInput(t *testing.T) {
 	cases := []struct {
 		name string
@@ -174,6 +226,7 @@ func TestBuildIMSSecurityAssociationXFRMInstallPlanRejectsInvalidInput(t *testin
 			req.Plan.PortServer = 0
 			req.Plan.Outbound.RemotePort = 0
 			req.Plan.Inbound.RemotePort = 0
+			req.Agreement.PortServer = 0
 			req.RemoteEndpoint.Port = 0
 		}},
 		{name: "missing client spi", edit: func(req *IMSSecurityAssociationInstallRequest) {
@@ -184,12 +237,24 @@ func TestBuildIMSSecurityAssociationXFRMInstallPlanRejectsInvalidInput(t *testin
 		{name: "unsupported auth", edit: func(req *IMSSecurityAssociationInstallRequest) {
 			req.Plan.Algorithm = "hmac-sha-256-128"
 		}},
+		{name: "bad IK for md5", edit: func(req *IMSSecurityAssociationInstallRequest) {
+			req.Plan.Algorithm = SecurityAlgorithmHMACMD596
+			req.Agreement.Algorithm = SecurityAlgorithmHMACMD596
+			req.AKA.IK = securityXFRMBytes(0xb0, 15)
+		}},
 		{name: "missing CK for aes cbc", edit: func(req *IMSSecurityAssociationInstallRequest) {
 			req.Plan.EncryptionAlgorithm = SecurityEncryptionAlgorithmAES
 			req.AKA.CK = nil
 		}},
+		{name: "short CK for aes cbc", edit: func(req *IMSSecurityAssociationInstallRequest) {
+			req.Plan.EncryptionAlgorithm = SecurityEncryptionAlgorithmAES
+			req.AKA.CK = securityXFRMBytes(0xa0, 15)
+		}},
 		{name: "unsupported encryption", edit: func(req *IMSSecurityAssociationInstallRequest) {
 			req.Plan.EncryptionAlgorithm = "des-ede3-cbc"
+		}},
+		{name: "unsupported ipsec protocol", edit: func(req *IMSSecurityAssociationInstallRequest) {
+			req.Agreement.Parameters = map[string]string{"prot": "ah"}
 		}},
 		{name: "unsupported mode", edit: func(req *IMSSecurityAssociationInstallRequest) {
 			req.Plan.Mode = "tunnel"

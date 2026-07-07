@@ -27,42 +27,62 @@ type NetworkConfig struct {
 	EmergencyDomain      string   `json:"emergency_domain"`
 }
 
-func (cfg *NetworkConfig) UnmarshalJSON(data []byte) error {
-	var raw struct {
-		IMSRealm             string          `json:"ims_realm"`
-		PrivateIdentityRealm string          `json:"private_identity_realm"`
-		NAIRealm             string          `json:"nai_realm"`
-		PCSCFFQDN            string          `json:"pcscf_fqdn"`
-		PCSCFFQDNs           json.RawMessage `json:"pcscf_fqdns"`
-		PCSCFFQDNList        json.RawMessage `json:"pcscf_fqdn_list"`
-		PCSCF                json.RawMessage `json:"pcscf"`
-		EPDGFQDN             string          `json:"epdg_fqdn"`
-		EmergencyDomain      string          `json:"emergency_domain"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
+type networkConfigJSON struct {
+	IMSRealm              string          `json:"ims_realm"`
+	IMSDomain             string          `json:"ims_domain"`
+	PrivateIdentityRealm  string          `json:"private_identity_realm"`
+	PrivateIdentityDomain string          `json:"private_identity_domain"`
+	NAIRealm              string          `json:"nai_realm"`
+	NAIDomain             string          `json:"nai_domain"`
+	PCSCFFQDN             string          `json:"pcscf_fqdn"`
+	PCSCFFQDNs            json.RawMessage `json:"pcscf_fqdns"`
+	PCSCFFQDNList         json.RawMessage `json:"pcscf_fqdn_list"`
+	PCSCFList             json.RawMessage `json:"pcscf_list"`
+	PCSCF                 json.RawMessage `json:"pcscf"`
+	EPDGFQDN              string          `json:"epdg_fqdn"`
+	EPDG                  string          `json:"epdg"`
+	EmergencyDomain       string          `json:"emergency_domain"`
+	EmergencyRealm        string          `json:"emergency_realm"`
+}
+
+func (raw networkConfigJSON) networkConfig() (NetworkConfig, error) {
 	pcscf, err := stringsFromNetworkJSON(raw.PCSCFFQDNs, true)
 	if err != nil {
-		return err
+		return NetworkConfig{}, err
 	}
 	pcscfList, err := stringsFromNetworkJSON(raw.PCSCFFQDNList, true)
 	if err != nil {
-		return err
+		return NetworkConfig{}, err
+	}
+	pcscfLegacyList, err := stringsFromNetworkJSON(raw.PCSCFList, true)
+	if err != nil {
+		return NetworkConfig{}, err
 	}
 	pcscfAlias, err := stringsFromNetworkJSON(raw.PCSCF, false)
 	if err != nil {
+		return NetworkConfig{}, err
+	}
+	return NetworkConfig{
+		IMSRealm:             firstNetworkString(raw.IMSRealm, raw.IMSDomain),
+		PrivateIdentityRealm: firstNetworkString(raw.PrivateIdentityRealm, raw.PrivateIdentityDomain),
+		NAIRealm:             firstNetworkString(raw.NAIRealm, raw.NAIDomain),
+		PCSCFFQDN:            raw.PCSCFFQDN,
+		PCSCFFQDNs:           append(append(append(pcscf, pcscfList...), pcscfLegacyList...), pcscfAlias...),
+		EPDGFQDN:             firstNetworkString(raw.EPDGFQDN, raw.EPDG),
+		EmergencyDomain:      firstNetworkString(raw.EmergencyDomain, raw.EmergencyRealm),
+	}, nil
+}
+
+func (cfg *NetworkConfig) UnmarshalJSON(data []byte) error {
+	var raw networkConfigJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	*cfg = NetworkConfig{
-		IMSRealm:             raw.IMSRealm,
-		PrivateIdentityRealm: raw.PrivateIdentityRealm,
-		NAIRealm:             raw.NAIRealm,
-		PCSCFFQDN:            raw.PCSCFFQDN,
-		PCSCFFQDNs:           append(append(pcscf, pcscfList...), pcscfAlias...),
-		EPDGFQDN:             raw.EPDGFQDN,
-		EmergencyDomain:      raw.EmergencyDomain,
+	network, err := raw.networkConfig()
+	if err != nil {
+		return err
 	}
+	*cfg = network
 	return nil
 }
 
@@ -89,6 +109,35 @@ type EffectiveCarrierConfig struct {
 	PresetID string        `json:"preset_id"`
 	E911     E911Config    `json:"e911"`
 	Network  NetworkConfig `json:"network"`
+}
+
+func (cfg *EffectiveCarrierConfig) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		MCC      string        `json:"mcc"`
+		MNC      string        `json:"mnc"`
+		PresetID string        `json:"preset_id"`
+		E911     E911Config    `json:"e911"`
+		Network  NetworkConfig `json:"network"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var aliases networkConfigJSON
+	if err := json.Unmarshal(data, &aliases); err != nil {
+		return err
+	}
+	aliasNetwork, err := aliases.networkConfig()
+	if err != nil {
+		return err
+	}
+	*cfg = EffectiveCarrierConfig{
+		MCC:      raw.MCC,
+		MNC:      raw.MNC,
+		PresetID: raw.PresetID,
+		E911:     raw.E911,
+		Network:  mergeNetworkAliasConfig(raw.Network, aliasNetwork),
+	}
+	return nil
 }
 
 type EffectiveCarrierConfigInput struct {
@@ -496,6 +545,38 @@ func appendNetworkStrings(out []string, values ...string) []string {
 		}
 	}
 	return out
+}
+
+func firstNetworkString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mergeNetworkAliasConfig(base, alias NetworkConfig) NetworkConfig {
+	if strings.TrimSpace(base.IMSRealm) == "" {
+		base.IMSRealm = alias.IMSRealm
+	}
+	if strings.TrimSpace(base.PrivateIdentityRealm) == "" {
+		base.PrivateIdentityRealm = alias.PrivateIdentityRealm
+	}
+	if strings.TrimSpace(base.NAIRealm) == "" {
+		base.NAIRealm = alias.NAIRealm
+	}
+	if strings.TrimSpace(base.PCSCFFQDN) == "" {
+		base.PCSCFFQDN = alias.PCSCFFQDN
+	}
+	base.PCSCFFQDNs = append(base.PCSCFFQDNs, alias.PCSCFFQDNs...)
+	if strings.TrimSpace(base.EPDGFQDN) == "" {
+		base.EPDGFQDN = alias.EPDGFQDN
+	}
+	if strings.TrimSpace(base.EmergencyDomain) == "" {
+		base.EmergencyDomain = alias.EmergencyDomain
+	}
+	return base
 }
 
 func normalizeMCC(mcc string) string {

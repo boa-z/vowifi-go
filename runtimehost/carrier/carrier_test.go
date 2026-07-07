@@ -1,9 +1,11 @@
 package carrier
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -170,6 +172,82 @@ func TestLoadCarrierOverridesNormalizesPCSCFCandidates(t *testing.T) {
 	got := PCSCFCandidates(NetworkConfig{PCSCFFQDNs: []string{" PCSCF-X.EXAMPLE.TEST. ", "pcscf-x.example.test", "pcscf-y.example.test"}})
 	if !reflect.DeepEqual(got, []string{"pcscf-x.example.test", "pcscf-y.example.test"}) {
 		t.Fatalf("PCSCFCandidates()=%+v", got)
+	}
+}
+
+func TestLoadCarrierOverridesAcceptsNetworkAliases(t *testing.T) {
+	ClearCarrierOverrides()
+	t.Cleanup(ClearCarrierOverrides)
+
+	path := filepath.Join(t.TempDir(), "carriers.json")
+	if err := os.WriteFile(path, []byte(`{
+		"001010": {
+			"mcc": "001",
+			"mnc": "010",
+			"network": {
+				"ims_domain": " IMS.ALIAS.EXAMPLE. ",
+				"pcscf_fqdn": " PCSCF-A.ALIAS.EXAMPLE. ",
+				"pcscf_list": ["pcscf-b.alias.example.", "pcscf-a.alias.example"],
+				"epdg": " EPDG.ALIAS.EXAMPLE. ",
+				"emergency_realm": " SOS.ALIAS.EXAMPLE. "
+			}
+		}
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCarrierOverrides(path); err != nil {
+		t.Fatalf("LoadCarrierOverrides() error = %v", err)
+	}
+	cfg := ResolveEffectiveCarrierConfig(EffectiveCarrierConfigInput{MCC: "001", MNC: "010"})
+	if cfg.Network.IMSRealm != "ims.alias.example" ||
+		cfg.Network.PrivateIdentityRealm != "ims.alias.example" ||
+		cfg.Network.EPDGFQDN != "epdg.alias.example" ||
+		cfg.Network.EmergencyDomain != "sos.alias.example" {
+		t.Fatalf("Network=%+v, want normalized alias fields", cfg.Network)
+	}
+	wantPCSCF := []string{"pcscf-a.alias.example", "pcscf-b.alias.example"}
+	if cfg.Network.PCSCFFQDN != wantPCSCF[0] || !reflect.DeepEqual(cfg.Network.PCSCFFQDNs, wantPCSCF) {
+		t.Fatalf("P-CSCF=%q/%+v, want %+v", cfg.Network.PCSCFFQDN, cfg.Network.PCSCFFQDNs, wantPCSCF)
+	}
+	raw, err := json.Marshal(cfg.Network)
+	if err != nil {
+		t.Fatalf("Marshal(Network) error = %v", err)
+	}
+	if strings.Contains(string(raw), "ims_domain") || strings.Contains(string(raw), "epdg\"") ||
+		!strings.Contains(string(raw), "ims_realm") || !strings.Contains(string(raw), "epdg_fqdn") {
+		t.Fatalf("marshaled network JSON=%s, want canonical field names", raw)
+	}
+}
+
+func TestLoadCarrierOverridesAcceptsTopLevelNetworkAliases(t *testing.T) {
+	ClearCarrierOverrides()
+	t.Cleanup(ClearCarrierOverrides)
+
+	path := filepath.Join(t.TempDir(), "carriers.json")
+	if err := os.WriteFile(path, []byte(`{
+		"001011": {
+			"mcc": "001",
+			"mnc": "011",
+			"ims_domain": " IMS.TOP.EXAMPLE. ",
+			"pcscf_list": "pcscf-a.top.example, pcscf-b.top.example.",
+			"epdg": " EPDG.TOP.EXAMPLE. ",
+			"emergency_realm": " SOS.TOP.EXAMPLE. "
+		}
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCarrierOverrides(path); err != nil {
+		t.Fatalf("LoadCarrierOverrides() error = %v", err)
+	}
+	cfg := ResolveEffectiveCarrierConfig(EffectiveCarrierConfigInput{MCC: "001", MNC: "011"})
+	if cfg.Network.IMSRealm != "ims.top.example" ||
+		cfg.Network.PCSCFFQDN != "pcscf-a.top.example" ||
+		cfg.Network.EPDGFQDN != "epdg.top.example" ||
+		cfg.Network.EmergencyDomain != "sos.top.example" {
+		t.Fatalf("Network=%+v, want top-level alias fields", cfg.Network)
+	}
+	if !reflect.DeepEqual(cfg.Network.PCSCFFQDNs, []string{"pcscf-a.top.example", "pcscf-b.top.example"}) {
+		t.Fatalf("PCSCFFQDNs=%+v, want split top-level pcscf_list", cfg.Network.PCSCFFQDNs)
 	}
 }
 

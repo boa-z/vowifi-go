@@ -132,6 +132,40 @@ func ReadRecordAPDU(record, le int) []byte {
 	return []byte{0x00, 0xB2, byte(record), 0x04, leByte}
 }
 
+func UpdateBinaryAPDU(offset int, data []byte) ([]byte, error) {
+	if offset < 0 || offset > 0xFFFF {
+		return nil, fmt.Errorf("invalid UPDATE BINARY offset: %d", offset)
+	}
+	if err := validateShortAPDUData("UPDATE BINARY", data); err != nil {
+		return nil, err
+	}
+	apdu := []byte{0x00, 0xD6, byte(offset >> 8), byte(offset), byte(len(data))}
+	apdu = append(apdu, data...)
+	return apdu, nil
+}
+
+func UpdateRecordAPDU(record int, data []byte) ([]byte, error) {
+	if record <= 0 || record > 0xFF {
+		return nil, fmt.Errorf("invalid UPDATE RECORD number: %d", record)
+	}
+	if err := validateShortAPDUData("UPDATE RECORD", data); err != nil {
+		return nil, err
+	}
+	apdu := []byte{0x00, 0xDC, byte(record), 0x04, byte(len(data))}
+	apdu = append(apdu, data...)
+	return apdu, nil
+}
+
+func validateShortAPDUData(operation string, data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("%s data is empty", operation)
+	}
+	if len(data) > 0xFF {
+		return fmt.Errorf("%s data too long for short APDU Lc: %d", operation, len(data))
+	}
+	return nil
+}
+
 func Transmit(t LogicalChannelTransport, channel int, cmd []byte) (Response, error) {
 	resp, err := transmitOnce(t, channel, cmd)
 	if err != nil {
@@ -359,6 +393,44 @@ func ReadLinearFixedEF(t LogicalChannelTransport, channel int, fid uint16, maxRe
 		records = append(records, append([]byte(nil), resp.Body...))
 	}
 	return records, selectResp, nil
+}
+
+func WriteTransparentEF(t LogicalChannelTransport, channel int, fid uint16, data []byte) (Response, error) {
+	apdu, err := UpdateBinaryAPDU(0, data)
+	if err != nil {
+		return Response{}, err
+	}
+	selectResp, err := SelectFile(t, channel, fid)
+	if err != nil {
+		return selectResp, err
+	}
+	resp, err := Transmit(t, channel, apdu)
+	if err != nil {
+		return Response{}, err
+	}
+	if !resp.Success() {
+		return resp, newStatusError(fmt.Sprintf("UPDATE BINARY %04X offset=0", fid), resp)
+	}
+	return resp, nil
+}
+
+func WriteLinearFixedEFRecord(t LogicalChannelTransport, channel int, fid uint16, record int, data []byte) (Response, error) {
+	apdu, err := UpdateRecordAPDU(record, data)
+	if err != nil {
+		return Response{}, err
+	}
+	selectResp, err := SelectFile(t, channel, fid)
+	if err != nil {
+		return selectResp, err
+	}
+	resp, err := Transmit(t, channel, apdu)
+	if err != nil {
+		return Response{}, err
+	}
+	if !resp.Success() {
+		return resp, newStatusError(fmt.Sprintf("UPDATE RECORD %04X #%d", fid, record), resp)
+	}
+	return resp, nil
 }
 
 func isRecordNotFound(sw1, sw2 byte) bool {

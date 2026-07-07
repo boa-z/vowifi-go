@@ -61,6 +61,48 @@ func (e timeoutErrorForTest) Timeout() bool {
 	return true
 }
 
+type recoveryCommandCall struct {
+	command string
+	timeout time.Duration
+}
+
+type recordingATRecoveryExecutor struct {
+	calls        []recoveryCommandCall
+	errByCommand map[string]error
+}
+
+func (r *recordingATRecoveryExecutor) ExecuteATRecovery(ctx context.Context, command string, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.calls = append(r.calls, recoveryCommandCall{command: command, timeout: timeout})
+	if r.errByCommand == nil {
+		return nil
+	}
+	return r.errByCommand[command]
+}
+
+type recoveryFakeAT struct {
+	calls     []string
+	timeouts  []time.Duration
+	responses []string
+	err       error
+}
+
+func (f *recoveryFakeAT) ExecuteATSilent(cmd string, timeout time.Duration) (string, error) {
+	f.calls = append(f.calls, cmd)
+	f.timeouts = append(f.timeouts, timeout)
+	if f.err != nil {
+		return "", f.err
+	}
+	if len(f.responses) == 0 {
+		return "OK", nil
+	}
+	out := f.responses[0]
+	f.responses = f.responses[1:]
+	return out, nil
+}
+
 func TestClassifyRecoveryErrorFromStatusCarrier(t *testing.T) {
 	err := errors.Join(errors.New("logical-channel ISIM identity"), statusErrorForTest{status: 0x6F00})
 	if got := ClassifyError(err); got != RecoveryClassSIMBusy {
@@ -190,6 +232,126 @@ func TestATControlRecoveryPlan(t *testing.T) {
 				t.Fatalf("PlanATControlRecovery() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunATRecoveryPlanSkipsVendorSpecificByDefault(t *testing.T) {
+	plan := PlanATControlRecovery(RecoveryClassControlPortHung, 2)
+	executor := &recordingATRecoveryExecutor{}
+
+	if err := RunATRecoveryPlan(context.Background(), executor, plan, ATRecoveryOptions{}); err != nil {
+		t.Fatalf("RunATRecoveryPlan() error = %v", err)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("calls = %#v, want none", executor.calls)
+	}
+}
+
+func TestRunATRecoveryPlanAllowsVendorSpecific(t *testing.T) {
+	plan := PlanATControlRecovery(RecoveryClassControlPortHung, 2)
+	executor := &recordingATRecoveryExecutor{}
+	var delays []time.Duration
+
+	err := RunATRecoveryPlan(context.Background(), executor, plan, ATRecoveryOptions{
+		AllowVendorSpecific: true,
+		Delay: func(ctx context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			return ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunATRecoveryPlan() error = %v", err)
+	}
+
+	wantCalls := []recoveryCommandCall{{command: "AT!RESET", timeout: 10 * time.Second}}
+	if !reflect.DeepEqual(executor.calls, wantCalls) {
+		t.Fatalf("calls = %#v, want %#v", executor.calls, wantCalls)
+	}
+	if !reflect.DeepEqual(delays, []time.Duration{30 * time.Second}) {
+		t.Fatalf("delays = %#v, want 30s", delays)
+	}
+}
+
+func TestRunATRecoveryPlanDryRunDoesNotExecute(t *testing.T) {
+	executor := &recordingATRecoveryExecutor{}
+	delayCalled := false
+	steps := []ATRecoveryStep{
+		{Command: "AT+CFUN=0", Timeout: time.Second, DelayAfter: time.Second},
+	}
+
+	err := RunATRecoveryPlan(context.Background(), executor, steps, ATRecoveryOptions{
+		DryRun: true,
+		Delay: func(context.Context, time.Duration) error {
+			delayCalled = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunATRecoveryPlan(dry-run) error = %v", err)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("calls = %#v, want none", executor.calls)
+	}
+	if delayCalled {
+		t.Fatal("delay was called during dry-run")
+	}
+}
+
+func TestRunATRecoveryPlanContinueOnError(t *testing.T) {
+	firstErr := errors.New("radio off failed")
+	executor := &recordingATRecoveryExecutor{
+		errByCommand: map[string]error{"AT+CFUN=0": firstErr},
+	}
+	steps := []ATRecoveryStep{
+		{Command: "AT+CFUN=0", Timeout: time.Second, ContinueOnError: true},
+		{Command: "AT+CFUN=1", Timeout: 2 * time.Second},
+	}
+
+	if err := RunATRecoveryPlan(context.Background(), executor, steps, ATRecoveryOptions{}); err != nil {
+		t.Fatalf("RunATRecoveryPlan() error = %v", err)
+	}
+	want := []recoveryCommandCall{
+		{command: "AT+CFUN=0", timeout: time.Second},
+		{command: "AT+CFUN=1", timeout: 2 * time.Second},
+	}
+	if !reflect.DeepEqual(executor.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", executor.calls, want)
+	}
+}
+
+func TestRunATRecoveryPlanContextCancelDuringDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	executor := &recordingATRecoveryExecutor{}
+	steps := []ATRecoveryStep{
+		{Command: "AT+CFUN=1", Timeout: time.Second, DelayAfter: time.Second},
+	}
+
+	err := RunATRecoveryPlan(ctx, executor, steps, ATRecoveryOptions{
+		Delay: func(ctx context.Context, delay time.Duration) error {
+			cancel()
+			return ctx.Err()
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunATRecoveryPlan() error = %v, want context canceled", err)
+	}
+	if len(executor.calls) != 1 {
+		t.Fatalf("calls = %#v, want one command before delay cancellation", executor.calls)
+	}
+}
+
+func TestExecuteATControlRecoveryPassesTimeout(t *testing.T) {
+	at := &recoveryFakeAT{responses: []string{"OK"}}
+	steps := []ATRecoveryStep{{Command: "AT+CFUN=1", Timeout: 7 * time.Second}}
+
+	if err := ExecuteATControlRecovery(context.Background(), at, steps, ATRecoveryOptions{}); err != nil {
+		t.Fatalf("ExecuteATControlRecovery() error = %v", err)
+	}
+	if !reflect.DeepEqual(at.calls, []string{"AT+CFUN=1"}) {
+		t.Fatalf("calls = %#v, want AT+CFUN=1", at.calls)
+	}
+	if !reflect.DeepEqual(at.timeouts, []time.Duration{7 * time.Second}) {
+		t.Fatalf("timeouts = %#v, want 7s", at.timeouts)
 	}
 }
 

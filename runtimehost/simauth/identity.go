@@ -163,6 +163,35 @@ func DecodeUSIMIMSI(raw []byte) (string, error) {
 	return string(digits), nil
 }
 
+// EncodeUSIMIMSI encodes an IMSI for the transparent EF_IMSI mobile-identity
+// payload.
+func EncodeUSIMIMSI(imsi string) ([]byte, error) {
+	imsi = strings.TrimSpace(imsi)
+	if err := validateDecimalDigits("IMSI", imsi, 5, 15); err != nil {
+		return nil, err
+	}
+
+	mobileIdentityLength := 1 + len(imsi)/2
+	out := make([]byte, 1+mobileIdentityLength)
+	out[0] = byte(mobileIdentityLength)
+	out[1] = ((imsi[0] - '0') << 4) | 0x01
+	if len(imsi)%2 != 0 {
+		out[1] |= 0x08
+	}
+
+	offset := 2
+	for i := 1; i < len(imsi); i += 2 {
+		lo := imsi[i] - '0'
+		hi := byte(0x0F)
+		if i+1 < len(imsi) {
+			hi = imsi[i+1] - '0'
+		}
+		out[offset] = lo | (hi << 4)
+		offset++
+	}
+	return out, nil
+}
+
 // MNCLengthFromAD returns the MNC length advertised in USIM EF_AD byte 4.
 func MNCLengthFromAD(ad []byte) (int, bool) {
 	if len(ad) < 4 {

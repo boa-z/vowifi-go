@@ -42,6 +42,32 @@ type ATRecoveryStep struct {
 	VendorSpecific  bool
 }
 
+// ATRecoveryOptions tunes execution of a planned AT control recovery sequence.
+type ATRecoveryOptions struct {
+	AllowVendorSpecific bool
+	DryRun              bool
+	Delay               ATRecoveryDelayFunc
+}
+
+// ATRecoveryDelayFunc waits between recovery steps and should return ctx.Err()
+// when the context is canceled before the delay completes.
+type ATRecoveryDelayFunc func(ctx context.Context, delay time.Duration) error
+
+// ATRecoveryExecutor executes one AT recovery command.
+type ATRecoveryExecutor interface {
+	ExecuteATRecovery(ctx context.Context, command string, timeout time.Duration) error
+}
+
+// ATRecoveryExecutorFunc adapts a function to ATRecoveryExecutor.
+type ATRecoveryExecutorFunc func(ctx context.Context, command string, timeout time.Duration) error
+
+func (f ATRecoveryExecutorFunc) ExecuteATRecovery(ctx context.Context, command string, timeout time.Duration) error {
+	if f == nil {
+		return errors.New("nil AT recovery executor func")
+	}
+	return f(ctx, command, timeout)
+}
+
 type recoveryClassifier interface {
 	RecoveryClass() RecoveryClass
 }
@@ -107,6 +133,63 @@ func PlanATControlRecovery(class RecoveryClass, attempt int) []ATRecoveryStep {
 			},
 		}
 	}
+}
+
+// ExecuteATControlRecovery runs planned AT control recovery steps through an ATCommander.
+func ExecuteATControlRecovery(ctx context.Context, control ATCommander, steps []ATRecoveryStep, opts ATRecoveryOptions) error {
+	if control == nil {
+		return errors.New("nil AT control")
+	}
+	return RunATRecoveryPlan(ctx, ATRecoveryExecutorFunc(func(ctx context.Context, command string, timeout time.Duration) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		out, err := control.ExecuteATSilent(command, timeout)
+		if err != nil {
+			return err
+		}
+		return parseATError(out)
+	}), steps, opts)
+}
+
+// RunATRecoveryPlan executes a planned AT recovery sequence.
+//
+// Vendor-specific steps are skipped unless opts.AllowVendorSpecific is true.
+// DryRun returns without executing commands or delays.
+func RunATRecoveryPlan(ctx context.Context, executor ATRecoveryExecutor, steps []ATRecoveryStep, opts ATRecoveryOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if opts.DryRun {
+		return ctx.Err()
+	}
+	if executor == nil {
+		return errors.New("nil AT recovery executor")
+	}
+	delay := opts.Delay
+	if delay == nil {
+		delay = sleepATRecoveryDelay
+	}
+	for _, step := range steps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if step.VendorSpecific && !opts.AllowVendorSpecific {
+			continue
+		}
+		if err := executor.ExecuteATRecovery(ctx, step.Command, step.Timeout); err != nil {
+			if !step.ContinueOnError {
+				return fmt.Errorf("AT recovery command %q: %w", step.Command, err)
+			}
+		}
+		if step.DelayAfter <= 0 {
+			continue
+		}
+		if err := delay(ctx, step.DelayAfter); err != nil {
+			return fmt.Errorf("AT recovery delay after %q: %w", step.Command, err)
+		}
+	}
+	return nil
 }
 
 func PlanAPDUStatusRecovery(sw1, sw2 byte) APDURecoveryPlan {
@@ -259,6 +342,20 @@ func (r CRSMResult) RecoveryClass() RecoveryClass {
 
 func needsATControlRecovery(class RecoveryClass) bool {
 	return class == RecoveryClassControlPortHung || class == RecoveryClassATError
+}
+
+func sleepATRecoveryDelay(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func classifyErrorText(text string) RecoveryClass {

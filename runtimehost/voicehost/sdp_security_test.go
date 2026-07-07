@@ -208,11 +208,153 @@ func TestBuildSDPAnswerWithSecurityConstructsCrypto(t *testing.T) {
 	}
 }
 
+func TestParseSDPSecurityPreservesRTCPFeedbackMuxRSizeAndUnknownAttributes(t *testing.T) {
+	key128 := testSDPSecurityCryptoInlineKeyParamsForProfile(t, SRTPProfileAes128CmHmacSha1_80)
+	key256 := testSDPSecurityCryptoInlineKeyParamsForProfile(t, SRTPProfileAes256CmHmacSha1_80)
+	raw := []byte("v=0\r\n" +
+		"o=user 0 0 IN IP4 203.0.113.8\r\n" +
+		"s=-\r\n" +
+		"c=IN IP4 203.0.113.8\r\n" +
+		"t=0 0\r\n" +
+		"a=fingerprint:SHA-256 AA:BB:CC:DD:EE:FF\r\n" +
+		"a=setup:actpass\r\n" +
+		"a=rtcp-fb:* nack\r\n" +
+		"m=audio 49170 RTP/SAVPF 96 97 110\r\n" +
+		"a=rtcp-mux\r\n" +
+		"a=rtcp-rsize\r\n" +
+		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 " + key128 + " UNENCRYPTED_SRTP\r\n" +
+		"a=crypto:2 AES_CM_256_HMAC_SHA1_80 " + key256 + "\r\n" +
+		"a=rtcp-fb:96 nack pli\r\n" +
+		"a=rtcp-fb:97 goog-remb\r\n" +
+		"a=rtcp-fb:* trr-int 100\r\n" +
+		"a=x-ims-bearer:preserve me\r\n" +
+		"a=rtpmap:96 AMR/8000\r\n" +
+		"a=rtpmap:97 AMR-WB/16000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n")
+
+	info, security, err := ParseSDPWithSecurity(raw)
+	if err != nil {
+		t.Fatalf("ParseSDPWithSecurity() error = %v", err)
+	}
+	if security.RTPProfile != "RTP/SAVPF" || len(security.Crypto) != 2 || !security.RTCPMux || !security.RTCPReducedSize {
+		t.Fatalf("security=%+v", security)
+	}
+	if security.Setup != "actpass" || len(security.Fingerprints) != 1 || security.Fingerprints[0].HashFunc != "SHA-256" {
+		t.Fatalf("inherited fingerprint/setup=%+v", security)
+	}
+	if len(security.RTCPFeedback) != 3 || security.RTCPFeedback[0].Payload != "96" || security.RTCPFeedback[0].Parameter != "pli" {
+		t.Fatalf("rtcp feedback=%+v", security.RTCPFeedback)
+	}
+	if len(security.UnknownAttributes) != 1 || security.UnknownAttributes[0] != "a=x-ims-bearer:preserve me" {
+		t.Fatalf("unknown attributes=%+v", security.UnknownAttributes)
+	}
+
+	answer := string(BuildSDPAnswerWithSecurity(info, security))
+	for _, want := range []string{
+		"m=audio 49170 RTP/SAVPF 96 97 110\r\n",
+		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 " + key128 + " UNENCRYPTED_SRTP\r\n",
+		"a=crypto:2 AES_CM_256_HMAC_SHA1_80 " + key256 + "\r\n",
+		"a=fingerprint:SHA-256 AA:BB:CC:DD:EE:FF\r\n",
+		"a=setup:actpass\r\n",
+		"a=rtcp-mux\r\n",
+		"a=rtcp-rsize\r\n",
+		"a=rtcp-fb:96 nack pli\r\n",
+		"a=rtcp-fb:97 goog-remb\r\n",
+		"a=rtcp-fb:* trr-int 100\r\n",
+		"a=x-ims-bearer:preserve me\r\n",
+	} {
+		if !strings.Contains(answer, want) {
+			t.Fatalf("answer missing %q:\n%s", want, answer)
+		}
+	}
+	if strings.Contains(answer, "a=rtcp-fb:* nack\r\n") {
+		t.Fatalf("answer used session-level rtcp-fb despite media override:\n%s", answer)
+	}
+}
+
+func TestApplySDPSecurityRewritesExistingSecurityAndRTCPAttributes(t *testing.T) {
+	keyParams := testSDPSecurityCryptoInlineKeyParams(t)
+	base := []byte("v=0\r\n" +
+		"c=IN IP4 192.0.2.10\r\n" +
+		"a=fingerprint:SHA-256 AA:AA:AA\r\n" +
+		"a=setup:actpass\r\n" +
+		"m=audio 4000 RTP/SAVP 0 101\r\n" +
+		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 " + keyParams + "\r\n" +
+		"a=rtcp-mux\r\n" +
+		"a=rtcp-rsize\r\n" +
+		"a=rtcp-fb:* nack\r\n" +
+		"a=x-ims-bearer:old\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\n")
+	rewritten := string(applySDPSecurity(base, SDPSecurityInfo{
+		RTPProfile: "RTP/SAVPF",
+		Crypto: []SDPCryptoAttribute{{
+			Tag:       "2",
+			Suite:     "AES_CM_128_HMAC_SHA1_80",
+			KeyParams: keyParams,
+		}},
+		Fingerprints: []SDPFingerprintAttribute{{
+			HashFunc:    "SHA-256",
+			Fingerprint: "BB:BB:BB",
+		}},
+		Setup:           "passive",
+		RTCPMux:         true,
+		RTCPReducedSize: true,
+		RTCPFeedback: []SDPRTCPFeedbackAttribute{{
+			Payload:   "101",
+			Type:      "nack",
+			Parameter: "pli",
+		}},
+		UnknownAttributes: []string{"a=x-ims-bearer:new"},
+	}))
+
+	for _, want := range []string{
+		"m=audio 4000 RTP/SAVPF 0 101\r\n",
+		"a=crypto:2 AES_CM_128_HMAC_SHA1_80 " + keyParams + "\r\n",
+		"a=fingerprint:SHA-256 BB:BB:BB\r\n",
+		"a=setup:passive\r\n",
+		"a=rtcp-mux\r\n",
+		"a=rtcp-rsize\r\n",
+		"a=rtcp-fb:101 nack pli\r\n",
+		"a=x-ims-bearer:new\r\n",
+		"a=x-ims-bearer:old\r\n",
+		"a=rtpmap:0 PCMU/8000\r\n",
+	} {
+		if !strings.Contains(rewritten, want) {
+			t.Fatalf("rewritten missing %q:\n%s", want, rewritten)
+		}
+	}
+	for _, unexpected := range []string{"AA:AA:AA", "a=setup:actpass", "a=rtcp-fb:* nack"} {
+		if strings.Contains(rewritten, unexpected) {
+			t.Fatalf("rewritten kept %q:\n%s", unexpected, rewritten)
+		}
+	}
+	if strings.Count(rewritten, "a=rtcp-mux\r\n") != 1 || strings.Count(rewritten, "a=rtcp-rsize\r\n") != 1 {
+		t.Fatalf("rewritten duplicated mux/rsize:\n%s", rewritten)
+	}
+}
+
 func testSDPSecurityCryptoInlineKeyParams(t *testing.T) string {
 	t.Helper()
-	value, err := BuildSDPCryptoInlineKeyParams(SRTPProfileAes128CmHmacSha1_80, SDPCryptoInlineKeyParams{
-		MasterKey:  bytes.Repeat([]byte{0x11}, 16),
-		MasterSalt: bytes.Repeat([]byte{0x22}, 14),
+	return testSDPSecurityCryptoInlineKeyParamsForProfile(t, SRTPProfileAes128CmHmacSha1_80)
+}
+
+func testSDPSecurityCryptoInlineKeyParamsForProfile(t *testing.T, profile SRTPProtectionProfile) string {
+	t.Helper()
+	srtpProfile, err := srtpProtectionProfile(profile)
+	if err != nil {
+		t.Fatalf("srtpProtectionProfile() error = %v", err)
+	}
+	keyLen, err := srtpProfile.KeyLen()
+	if err != nil {
+		t.Fatalf("KeyLen() error = %v", err)
+	}
+	saltLen, err := srtpProfile.SaltLen()
+	if err != nil {
+		t.Fatalf("SaltLen() error = %v", err)
+	}
+	value, err := BuildSDPCryptoInlineKeyParams(profile, SDPCryptoInlineKeyParams{
+		MasterKey:  bytes.Repeat([]byte{0x11}, keyLen),
+		MasterSalt: bytes.Repeat([]byte{0x22}, saltLen),
 	})
 	if err != nil {
 		t.Fatalf("BuildSDPCryptoInlineKeyParams() error = %v", err)
@@ -301,5 +443,36 @@ func TestSelectSDPSecurityAnswerRejectsUnsupportedSetup(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("SelectSDPSecurityAnswer() error = nil, want setup rejection")
+	}
+}
+
+func TestSelectSDPSecurityAnswerCarriesRTCPAttributesWithoutSecurityFailure(t *testing.T) {
+	got, err := SelectSDPSecurityAnswer(SDPSecurityInfo{
+		RTPProfile:      "RTP/AVP",
+		RTCPMux:         true,
+		RTCPReducedSize: true,
+		RTCPFeedback: []SDPRTCPFeedbackAttribute{{
+			Payload:   "*",
+			Type:      "nack",
+			Parameter: "pli",
+		}},
+		UnknownAttributes: []string{"a=x-ims-bearer:preserve"},
+	}, SDPSecurityAnswerOptions{RTPProfiles: []string{"RTP/AVP"}})
+	if err != nil {
+		t.Fatalf("SelectSDPSecurityAnswer() error = %v", err)
+	}
+	if got.RTPProfile != "RTP/AVP" || !got.RTCPMux || !got.RTCPReducedSize || len(got.RTCPFeedback) != 1 || len(got.UnknownAttributes) != 1 {
+		t.Fatalf("answer security=%+v", got)
+	}
+	answer := string(BuildSDPAnswerWithSecurity(SDPInfo{ConnectionIP: "192.0.2.2", MediaPort: 6000, Payloads: []int{0}}, got))
+	for _, want := range []string{
+		"a=rtcp-mux\r\n",
+		"a=rtcp-rsize\r\n",
+		"a=rtcp-fb:* nack pli\r\n",
+		"a=x-ims-bearer:preserve\r\n",
+	} {
+		if !strings.Contains(answer, want) {
+			t.Fatalf("answer missing %q:\n%s", want, answer)
+		}
 	}
 }

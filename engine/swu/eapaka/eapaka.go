@@ -156,6 +156,13 @@ type ReauthenticationRequest struct {
 	EncryptedAttributes []Attribute
 }
 
+type NotificationInfo struct {
+	Value                uint16
+	Code                 uint16
+	Success              bool
+	BeforeAuthentication bool
+}
+
 func (p Packet) MarshalBinary() ([]byte, error) {
 	if p.Code == CodeSuccess || p.Code == CodeFailure {
 		out := []byte{p.Code, p.Identifier, 0, 4}
@@ -428,6 +435,112 @@ func FindAttribute(attrs []Attribute, attributeType uint8) (Attribute, bool) {
 	return Attribute{}, false
 }
 
+func FindSingleAttribute(attrs []Attribute, attributeType uint8) (Attribute, bool, error) {
+	var out Attribute
+	count := 0
+	for _, attr := range attrs {
+		if attr.Type != attributeType {
+			continue
+		}
+		out = attr
+		count++
+	}
+	switch count {
+	case 0:
+		return Attribute{}, false, nil
+	case 1:
+		return out, true, nil
+	default:
+		return Attribute{}, true, fmt.Errorf("%w: duplicate attribute %d", ErrInvalidAttribute, attributeType)
+	}
+}
+
+func NotificationFromAttributes(attrs []Attribute) (NotificationInfo, bool, error) {
+	attr, ok, err := FindSingleAttribute(attrs, AttributeNotification)
+	if err != nil || !ok {
+		return NotificationInfo{}, ok, err
+	}
+	info, err := attr.NotificationInfo()
+	if err != nil {
+		return NotificationInfo{}, true, err
+	}
+	return info, true, nil
+}
+
+func ParseNotificationRequest(request Packet) (NotificationInfo, error) {
+	if request.Code != CodeRequest || request.Subtype != SubtypeNotification {
+		return NotificationInfo{}, fmt.Errorf("%w: not an EAP-AKA notification request", ErrInvalidPacket)
+	}
+	if !isAKAType(request.Type) {
+		return NotificationInfo{}, fmt.Errorf("%w: EAP type %d", ErrInvalidPacket, request.Type)
+	}
+	info, ok, err := NotificationFromAttributes(request.Attributes)
+	if err != nil {
+		return NotificationInfo{}, err
+	}
+	if !ok {
+		return NotificationInfo{}, fmt.Errorf("%w: missing AT_NOTIFICATION", ErrInvalidAttribute)
+	}
+	return info, nil
+}
+
+func ClientErrorCodeFromAttributes(attrs []Attribute) (uint16, bool, error) {
+	attr, ok, err := FindSingleAttribute(attrs, AttributeClientErrorCode)
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+	code, err := attr.ClientErrorCodeValue()
+	if err != nil {
+		return 0, true, err
+	}
+	return code, true, nil
+}
+
+func ParseClientErrorResponse(response Packet) (uint16, error) {
+	if response.Code != CodeResponse || response.Subtype != SubtypeClientError {
+		return 0, fmt.Errorf("%w: not an EAP-AKA client-error response", ErrInvalidPacket)
+	}
+	if !isAKAType(response.Type) {
+		return 0, fmt.Errorf("%w: EAP type %d", ErrInvalidPacket, response.Type)
+	}
+	code, ok, err := ClientErrorCodeFromAttributes(response.Attributes)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("%w: missing AT_CLIENT_ERROR_CODE", ErrInvalidAttribute)
+	}
+	return code, nil
+}
+
+func CounterTooSmallFromAttributes(attrs []Attribute) (bool, error) {
+	attr, ok, err := FindSingleAttribute(attrs, AttributeCounterTooSmall)
+	if err != nil || !ok {
+		return ok, err
+	}
+	return true, attr.CounterTooSmallValue()
+}
+
+func CheckcodeFromAttributes(attrs []Attribute) ([]byte, bool, error) {
+	attr, ok, err := FindSingleAttribute(attrs, AttributeCheckcode)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	value, err := attr.CheckcodeValue()
+	if err != nil {
+		return nil, true, err
+	}
+	return value, true, nil
+}
+
+func ResultIndFromAttributes(attrs []Attribute) (bool, error) {
+	attr, ok, err := FindSingleAttribute(attrs, AttributeResultInd)
+	if err != nil || !ok {
+		return ok, err
+	}
+	return true, attr.ResultIndValue()
+}
+
 func ValidateAttributes(attrs []Attribute) error {
 	for _, attr := range attrs {
 		if err := ValidateAttribute(attr); err != nil {
@@ -672,6 +785,19 @@ func (a Attribute) KDFValue() (uint16, error) {
 
 func (a Attribute) NotificationValue() (uint16, error) {
 	return a.directUint16Value()
+}
+
+func (a Attribute) NotificationInfo() (NotificationInfo, error) {
+	value, err := a.NotificationValue()
+	if err != nil {
+		return NotificationInfo{}, err
+	}
+	return NotificationInfo{
+		Value:                value,
+		Code:                 value &^ (NotificationSuccessBit | NotificationPBit),
+		Success:              value&NotificationSuccessBit != 0,
+		BeforeAuthentication: value&NotificationPBit != 0,
+	}, nil
 }
 
 func (a Attribute) ClientErrorCodeValue() (uint16, error) {

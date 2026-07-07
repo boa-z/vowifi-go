@@ -125,6 +125,75 @@ func TestDecodeUSIMIMSI(t *testing.T) {
 	}
 }
 
+func TestEncodeUSIMIMSIRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		imsi string
+		want []byte
+	}{
+		{
+			name: "odd digit count",
+			imsi: "310260123456789",
+			want: []byte{0x08, 0x39, 0x01, 0x62, 0x10, 0x32, 0x54, 0x76, 0x98},
+		},
+		{
+			name: "significant trailing zero octet",
+			imsi: "310260123456700",
+			want: []byte{0x08, 0x39, 0x01, 0x62, 0x10, 0x32, 0x54, 0x76, 0x00},
+		},
+		{
+			name: "even digit count",
+			imsi: "00101012345678",
+			want: []byte{0x08, 0x01, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0xF8},
+		},
+		{
+			name: "minimum length",
+			imsi: "12345",
+			want: []byte{0x03, 0x19, 0x32, 0x54},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := EncodeUSIMIMSI(tt.imsi)
+			if err != nil {
+				t.Fatalf("EncodeUSIMIMSI() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("EncodeUSIMIMSI() = % X, want % X", got, tt.want)
+			}
+			decoded, err := DecodeUSIMIMSI(got)
+			if err != nil {
+				t.Fatalf("DecodeUSIMIMSI(EncodeUSIMIMSI()) error = %v", err)
+			}
+			if decoded != tt.imsi {
+				t.Fatalf("DecodeUSIMIMSI(EncodeUSIMIMSI()) = %q, want %q", decoded, tt.imsi)
+			}
+		})
+	}
+}
+
+func TestEncodeUSIMIMSIRejectsMalformedInput(t *testing.T) {
+	tests := []struct {
+		name string
+		imsi string
+	}{
+		{name: "empty", imsi: ""},
+		{name: "blank", imsi: "   "},
+		{name: "too short", imsi: "1234"},
+		{name: "too long", imsi: "1234567890123456"},
+		{name: "non digit", imsi: "31026A123456789"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := EncodeUSIMIMSI(tt.imsi); err == nil {
+				t.Fatalf("EncodeUSIMIMSI() = % X nil error, want error", got)
+			}
+		})
+	}
+}
+
 func TestDecodeUSIMIMSIRejectsMalformedEF(t *testing.T) {
 	tests := []struct {
 		name string

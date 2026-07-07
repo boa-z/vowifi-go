@@ -211,6 +211,122 @@ func TestReadTransparentAndLinearFixedEF(t *testing.T) {
 	}
 }
 
+func TestUpdateAPDUBuildersValidateInputs(t *testing.T) {
+	apdu, err := UpdateBinaryAPDU(0x0123, []byte{0xAA, 0xBB})
+	if err != nil {
+		t.Fatalf("UpdateBinaryAPDU() error = %v", err)
+	}
+	if !reflect.DeepEqual(apdu, []byte{0x00, 0xD6, 0x01, 0x23, 0x02, 0xAA, 0xBB}) {
+		t.Fatalf("UpdateBinaryAPDU() = % X", apdu)
+	}
+
+	apdu, err = UpdateRecordAPDU(2, []byte{0x11, 0x22, 0x33})
+	if err != nil {
+		t.Fatalf("UpdateRecordAPDU() error = %v", err)
+	}
+	if !reflect.DeepEqual(apdu, []byte{0x00, 0xDC, 0x02, 0x04, 0x03, 0x11, 0x22, 0x33}) {
+		t.Fatalf("UpdateRecordAPDU() = % X", apdu)
+	}
+
+	longData := make([]byte, 256)
+	tests := []struct {
+		name string
+		fn   func() ([]byte, error)
+	}{
+		{name: "negative offset", fn: func() ([]byte, error) { return UpdateBinaryAPDU(-1, []byte{1}) }},
+		{name: "large offset", fn: func() ([]byte, error) { return UpdateBinaryAPDU(0x10000, []byte{1}) }},
+		{name: "nil binary data", fn: func() ([]byte, error) { return UpdateBinaryAPDU(0, nil) }},
+		{name: "empty binary data", fn: func() ([]byte, error) { return UpdateBinaryAPDU(0, []byte{}) }},
+		{name: "long binary data", fn: func() ([]byte, error) { return UpdateBinaryAPDU(0, longData) }},
+		{name: "zero record", fn: func() ([]byte, error) { return UpdateRecordAPDU(0, []byte{1}) }},
+		{name: "large record", fn: func() ([]byte, error) { return UpdateRecordAPDU(0x100, []byte{1}) }},
+		{name: "nil record data", fn: func() ([]byte, error) { return UpdateRecordAPDU(1, nil) }},
+		{name: "empty record data", fn: func() ([]byte, error) { return UpdateRecordAPDU(1, []byte{}) }},
+		{name: "long record data", fn: func() ([]byte, error) { return UpdateRecordAPDU(1, longData) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if apdu, err := tt.fn(); err == nil {
+				t.Fatalf("%s err=nil, apdu=% X", tt.name, apdu)
+			}
+		})
+	}
+}
+
+func TestWriteTransparentAndLinearFixedEFRecord(t *testing.T) {
+	ft := &fakeTransport{responses: []string{
+		"6204800200039000",
+		"9000",
+		"6207820521000005029000",
+		"9000",
+	}}
+	resp, err := WriteTransparentEF(ft, 1, 0x6F02, []byte{0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("WriteTransparentEF() error = %v", err)
+	}
+	if !resp.Success() {
+		t.Fatalf("WriteTransparentEF() status = %s, want success", resp.StatusString())
+	}
+	resp, err = WriteLinearFixedEFRecord(ft, 1, 0x6F04, 2, []byte{0xAA, 0xBB})
+	if err != nil {
+		t.Fatalf("WriteLinearFixedEFRecord() error = %v", err)
+	}
+	if !resp.Success() {
+		t.Fatalf("WriteLinearFixedEFRecord() status = %s, want success", resp.StatusString())
+	}
+	wantCalls := []string{"00A40004026F02", "00D6000003010203", "00A40004026F04", "00DC020402AABB"}
+	if !reflect.DeepEqual(ft.calls, wantCalls) {
+		t.Fatalf("calls = %#v, want %#v", ft.calls, wantCalls)
+	}
+}
+
+func TestWriteEFValidationRunsBeforeSelect(t *testing.T) {
+	ft := &fakeTransport{}
+	if _, err := WriteTransparentEF(ft, 1, 0x6F02, nil); err == nil {
+		t.Fatal("WriteTransparentEF(nil) err=nil, want error")
+	}
+	if _, err := WriteLinearFixedEFRecord(ft, 1, 0x6F04, 0, []byte{1}); err == nil {
+		t.Fatal("WriteLinearFixedEFRecord(record 0) err=nil, want error")
+	}
+	if len(ft.calls) != 0 {
+		t.Fatalf("validation calls = %#v, want none", ft.calls)
+	}
+}
+
+func TestWriteEFStatusErrors(t *testing.T) {
+	ft := &fakeTransport{responses: []string{
+		"6204800200019000",
+		"6985",
+	}}
+	resp, err := WriteTransparentEF(ft, 1, 0x6F02, []byte{0x01})
+	if err == nil {
+		t.Fatal("WriteTransparentEF(6985) err=nil, want status error")
+	}
+	if resp.StatusString() != "6985" {
+		t.Fatalf("WriteTransparentEF() status = %s, want 6985", resp.StatusString())
+	}
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("WriteTransparentEF() err=%T, want StatusError", err)
+	}
+
+	ft = &fakeTransport{responses: []string{
+		"6207820521000005019000",
+		"6A84",
+	}}
+	resp, err = WriteLinearFixedEFRecord(ft, 1, 0x6F04, 1, []byte{0xAA})
+	if err == nil {
+		t.Fatal("WriteLinearFixedEFRecord(6A84) err=nil, want status error")
+	}
+	if resp.StatusString() != "6A84" {
+		t.Fatalf("WriteLinearFixedEFRecord() status = %s, want 6A84", resp.StatusString())
+	}
+	statusErr = nil
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("WriteLinearFixedEFRecord() err=%T, want StatusError", err)
+	}
+}
+
 func TestBuildAndParseUSIMAuth(t *testing.T) {
 	rand16 := make([]byte, 16)
 	autn16 := make([]byte, 16)

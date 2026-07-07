@@ -249,6 +249,44 @@ func TestWireIMSRegistrarUsesTunnelInnerIPForContact(t *testing.T) {
 	}
 }
 
+func TestWireIMSRegistrarProfileFromPreparedCarrierFallbacks(t *testing.T) {
+	tests := []struct {
+		name     string
+		prepared identity.PreparedSession
+		wantIMPI string
+	}{
+		{
+			name: "effective carrier",
+			prepared: identity.PreparedSession{
+				Profile:          identity.Profile{IMSI: "001010123456789"},
+				EffectiveCarrier: identity.EffectiveCarrier{MCC: "001", MNC: "010"},
+			},
+			wantIMPI: "001010123456789@ims.mnc010.mcc001.3gppnetwork.org",
+		},
+		{
+			name: "prepared IMSI",
+			prepared: identity.PreparedSession{
+				Profile: identity.Profile{IMSI: "310280233641503"},
+			},
+			wantIMPI: "310280233641503@ims.mnc280.mcc310.3gppnetwork.org",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			profile, err := WireIMSRegistrar{}.profileFromConfig(IMSRegistrationConfig{Prepared: &tc.prepared})
+			if err != nil {
+				t.Fatalf("profileFromConfig() error = %v", err)
+			}
+			if profile.IMPI != tc.wantIMPI || profile.IMPU != "sip:"+tc.wantIMPI {
+				t.Fatalf("profile identities=%+v, want IMPI=%q", profile, tc.wantIMPI)
+			}
+			if profile.Domain == "" {
+				t.Fatalf("profile domain empty: %+v", profile)
+			}
+		})
+	}
+}
+
 func TestWireIMSRegistrarDefaultResolverUsesTunnelDNS(t *testing.T) {
 	dnsServers := []string{"10.0.0.53", "2001:db8::53"}
 	flow := WireIMSRegistrar{Timeout: 2 * time.Second}.defaultSIPFlow(IMSRegistrationConfig{

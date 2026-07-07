@@ -222,6 +222,43 @@ func TestSDPCryptoAttributeKeyHelpers(t *testing.T) {
 	}
 }
 
+func TestSelectSDPCryptoAttributeHonorsPreferencesAndSkipsUnsupported(t *testing.T) {
+	key128 := testSDPSecurityCryptoInlineKeyParamsForProfile(t, SRTPProfileAes128CmHmacSha1_80)
+	key256 := testSDPSecurityCryptoInlineKeyParamsForProfile(t, SRTPProfileAes256CmHmacSha1_80)
+	crypto := []SDPCryptoAttribute{
+		{Tag: "9", Suite: "F8_128_HMAC_SHA1_80", KeyParams: "inline:unsupported"},
+		{Tag: "1", Suite: "AES_CM_128_HMAC_SHA1_80", KeyParams: key128},
+		{Tag: "2", Suite: "AES_CM_256_HMAC_SHA1_80", KeyParams: key256},
+	}
+	attr, profile, params, ok, err := SelectSDPCryptoAttribute(crypto, []SRTPProtectionProfile{
+		SRTPProfileAes256CmHmacSha1_80,
+		SRTPProfileAes128CmHmacSha1_80,
+	})
+	if err != nil {
+		t.Fatalf("SelectSDPCryptoAttribute(preferred) error = %v", err)
+	}
+	if !ok || attr.Tag != "2" || profile != SRTPProfileAes256CmHmacSha1_80 || len(params.MasterKey) != 32 || len(params.MasterSalt) != 14 {
+		t.Fatalf("selected attr=%+v profile=%q params=%+v ok=%v", attr, profile, params, ok)
+	}
+
+	attr, profile, _, ok, err = SelectSDPCryptoAttribute(crypto, nil)
+	if err != nil {
+		t.Fatalf("SelectSDPCryptoAttribute(no preference) error = %v", err)
+	}
+	if !ok || attr.Tag != "1" || profile != SRTPProfileAes128CmHmacSha1_80 {
+		t.Fatalf("selected attr=%+v profile=%q ok=%v", attr, profile, ok)
+	}
+
+	_, _, _, ok, err = SelectSDPCryptoAttribute(crypto, []SRTPProtectionProfile{SRTPProfileAeadAes128Gcm})
+	if err != nil || ok {
+		t.Fatalf("SelectSDPCryptoAttribute(no match) ok=%v err=%v", ok, err)
+	}
+	_, _, _, ok, err = SelectSDPCryptoAttribute([]SDPCryptoAttribute{{Tag: "1", Suite: "AES_CM_128_HMAC_SHA1_80", KeyParams: "inline:short"}}, nil)
+	if ok || !errors.Is(err, ErrSRTPMediaConfig) {
+		t.Fatalf("SelectSDPCryptoAttribute(bad key) ok=%v err=%v, want ErrSRTPMediaConfig", ok, err)
+	}
+}
+
 func TestSRTPMediaSessionSupportsGCMProfile(t *testing.T) {
 	cfg := testSRTPMediaConfig()
 	cfg.Profile = SRTPProfileAeadAes128Gcm

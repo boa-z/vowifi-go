@@ -220,7 +220,7 @@ func normalizeIMSSecurityAssociationXFRMRequest(req IMSSecurityAssociationInstal
 	if isZeroIMSSecurityAssociationPlan(plan) {
 		var ok bool
 		plan, ok = BuildIMSSecurityAssociationPlan(req.Agreement)
-		if !ok {
+		if !ok && len(req.SelectedParameters) == 0 {
 			return imsSecurityXFRMParams{}, fmt.Errorf("%w: missing Security-Agree plan", ErrInvalidIMSSecurityXFRMPlan)
 		}
 	}
@@ -228,18 +228,21 @@ func normalizeIMSSecurityAssociationXFRMRequest(req IMSSecurityAssociationInstal
 	if protocol != DefaultSecurityProtocol {
 		return imsSecurityXFRMParams{}, fmt.Errorf("%w: unsupported protocol %q", ErrInvalidIMSSecurityXFRMPlan, protocol)
 	}
-	mode, err := imssSecurityXFRMMode(firstNonEmpty(plan.Mode, req.Agreement.Parameters["mode"], req.Agreement.Parameters["mod"], "trans"))
+	if err := imssSecurityXFRMProtocol(firstNonEmpty(req.Agreement.Parameters["prot"], req.SelectedParameters["prot"], defaultSecurityIPSecProtocol)); err != nil {
+		return imsSecurityXFRMParams{}, err
+	}
+	mode, err := imssSecurityXFRMMode(firstNonEmpty(plan.Mode, req.Agreement.Parameters["mode"], req.Agreement.Parameters["mod"], req.SelectedParameters["mode"], req.SelectedParameters["mod"], defaultSecurityMode))
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
-	authAlgorithm, authTruncBits, err := imssSecurityXFRMAuthAlgorithm(firstNonEmpty(plan.Algorithm, req.Agreement.Algorithm, DefaultSecurityAlgorithm))
+	authAlgorithm, authTruncBits, err := imssSecurityXFRMAuthAlgorithm(firstNonEmpty(plan.Algorithm, req.Agreement.Algorithm, req.SelectedParameters["alg"], DefaultSecurityAlgorithm))
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
 	if len(req.AKA.IK) != 16 {
 		return imsSecurityXFRMParams{}, fmt.Errorf("%w: IK length %d", ErrInvalidIMSSecurityXFRMPlan, len(req.AKA.IK))
 	}
-	encAlgorithm, encKey, err := imssSecurityXFRMEncryption(firstNonEmpty(plan.EncryptionAlgorithm, req.Agreement.EncryptionAlgorithm, DefaultSecurityEAlg), req.AKA.CK)
+	encAlgorithm, encKey, err := imssSecurityXFRMEncryption(firstNonEmpty(plan.EncryptionAlgorithm, req.Agreement.EncryptionAlgorithm, req.SelectedParameters["ealg"], DefaultSecurityEAlg), req.AKA.CK)
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
@@ -251,19 +254,19 @@ func normalizeIMSSecurityAssociationXFRMRequest(req IMSSecurityAssociationInstal
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
-	localPort, err := imssSecurityXFRMPort(firstIMSSecurityPositiveInt(plan.PortClient, plan.Outbound.LocalPort, plan.Inbound.LocalPort, req.LocalEndpoint.Port), "local")
+	localPort, err := imssSecurityXFRMPort(firstIMSSecurityPositiveInt(plan.PortClient, plan.Outbound.LocalPort, plan.Inbound.LocalPort, req.Agreement.PortClient, parseSecurityPort(req.SelectedParameters["port-c"]), req.LocalEndpoint.Port), "local")
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
-	remotePort, err := imssSecurityXFRMPort(firstIMSSecurityPositiveInt(plan.PortServer, plan.Outbound.RemotePort, plan.Inbound.RemotePort, req.RemoteEndpoint.Port), "remote")
+	remotePort, err := imssSecurityXFRMPort(firstIMSSecurityPositiveInt(plan.PortServer, plan.Outbound.RemotePort, plan.Inbound.RemotePort, req.Agreement.PortServer, parseSecurityPort(req.SelectedParameters["port-s"]), req.RemoteEndpoint.Port), "remote")
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
-	spiClient, err := imssSecurityXFRMSPI(firstIMSSecurityNonZeroUint32(plan.SPIClient, plan.Inbound.SPI, req.Agreement.SPIClient), "client")
+	spiClient, err := imssSecurityXFRMSPI(firstIMSSecurityNonZeroUint32(plan.SPIClient, plan.Inbound.SPI, req.Agreement.SPIClient, parseSecurityUint32(req.SelectedParameters["spi-c"])), "client")
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
-	spiServer, err := imssSecurityXFRMSPI(firstIMSSecurityNonZeroUint32(plan.SPIServer, plan.Outbound.SPI, req.Agreement.SPIServer), "server")
+	spiServer, err := imssSecurityXFRMSPI(firstIMSSecurityNonZeroUint32(plan.SPIServer, plan.Outbound.SPI, req.Agreement.SPIServer, parseSecurityUint32(req.SelectedParameters["spi-s"])), "server")
 	if err != nil {
 		return imsSecurityXFRMParams{}, err
 	}
@@ -340,6 +343,15 @@ func imssSecurityXFRMPolicyCommand(params imsSecurityXFRMParams, dir string) IMS
 		"dir", dir,
 	}
 	return IMSSecurityAssociationXFRMCommand{Args: args, UndoArgs: undo}
+}
+
+func imssSecurityXFRMProtocol(protocol string) error {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "", defaultSecurityIPSecProtocol:
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported ipsec protocol %q", ErrInvalidIMSSecurityXFRMPlan, protocol)
+	}
 }
 
 func imssSecurityXFRMMode(mode string) (string, error) {

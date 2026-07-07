@@ -87,6 +87,12 @@ type RTCPFeedbackSummary struct {
 	UnknownPackets                   uint64
 }
 
+type SDPRTCPFeedbackAttribute struct {
+	Payload   string
+	Type      string
+	Parameter string
+}
+
 func InspectRTCPFeedback(direction RTCPFeedbackDirection, packet []byte, handler RTCPFeedbackHandler) (RTCPFeedbackSummary, error) {
 	var summary RTCPFeedbackSummary
 	packets, err := rtcp.Unmarshal(packet)
@@ -100,6 +106,162 @@ func InspectRTCPFeedback(direction RTCPFeedbackDirection, packet []byte, handler
 		}
 	}
 	return summary, nil
+}
+
+func ParseSDPRTCPFeedbackLine(line string) (SDPRTCPFeedbackAttribute, bool, error) {
+	value, ok := cutSDPAttributeValue(line, "a=rtcp-fb:")
+	if !ok {
+		return SDPRTCPFeedbackAttribute{}, false, nil
+	}
+	payload, rest, ok := cutSDPField(value)
+	if !ok || !validSDPRTCPFeedbackPayload(payload) {
+		return SDPRTCPFeedbackAttribute{}, true, fmt.Errorf("%w: malformed rtcp-fb payload", ErrInvalidSDPSecurity)
+	}
+	feedbackType, parameter, ok := cutSDPField(rest)
+	if !ok || strings.TrimSpace(feedbackType) == "" {
+		return SDPRTCPFeedbackAttribute{}, true, fmt.Errorf("%w: malformed rtcp-fb attribute", ErrInvalidSDPSecurity)
+	}
+	attr := SDPRTCPFeedbackAttribute{
+		Payload:   strings.TrimSpace(payload),
+		Type:      strings.TrimSpace(feedbackType),
+		Parameter: strings.TrimSpace(parameter),
+	}
+	if attr.SDPValue() == "" {
+		return SDPRTCPFeedbackAttribute{}, true, fmt.Errorf("%w: malformed rtcp-fb attribute", ErrInvalidSDPSecurity)
+	}
+	return attr, true, nil
+}
+
+func (a SDPRTCPFeedbackAttribute) SDPValue() string {
+	payload := strings.TrimSpace(a.Payload)
+	feedbackType := strings.TrimSpace(a.Type)
+	if payload == "" || feedbackType == "" || !validSDPRTCPFeedbackPayload(payload) {
+		return ""
+	}
+	value := payload + " " + feedbackType
+	if parameter := strings.TrimSpace(a.Parameter); parameter != "" {
+		value += " " + parameter
+	}
+	return value
+}
+
+func ParseSDPRTCPFeedbackAttributes(body []byte) ([]SDPRTCPFeedbackAttribute, error) {
+	lines := sdpSecurityLines(body)
+	var session []SDPRTCPFeedbackAttribute
+	var media []SDPRTCPFeedbackAttribute
+	beforeFirstMedia := true
+	inAudio := false
+	sawAudio := false
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "m=") {
+			if inAudio {
+				break
+			}
+			beforeFirstMedia = false
+			inAudio = false
+			fields := strings.Fields(line)
+			if len(fields) > 0 && strings.EqualFold(fields[0], "m=audio") {
+				inAudio = true
+				sawAudio = true
+			}
+			continue
+		}
+		if beforeFirstMedia || inAudio {
+			attr, ok, err := ParseSDPRTCPFeedbackLine(line)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			if beforeFirstMedia {
+				session = append(session, attr)
+				continue
+			}
+			media = append(media, attr)
+		}
+	}
+	if !sawAudio {
+		return nil, fmt.Errorf("%w: missing SDP audio media", ErrInvalidSDPSecurity)
+	}
+	if len(media) == 0 {
+		media = session
+	}
+	return cloneSDPRTCPFeedbackAttributes(media), nil
+}
+
+func SelectSDPRTCPFeedbackAnswer(offer, local []SDPRTCPFeedbackAttribute, payloads []int) []SDPRTCPFeedbackAttribute {
+	if len(offer) == 0 {
+		return nil
+	}
+	if len(local) == 0 {
+		return filterSDPRTCPFeedbackPayloads(offer, payloads)
+	}
+	var out []SDPRTCPFeedbackAttribute
+	seen := make(map[string]bool)
+	for _, offered := range offer {
+		for _, allowed := range local {
+			if !sdpRTCPFeedbackCompatible(offered, allowed) {
+				continue
+			}
+			answer := offered
+			if strings.TrimSpace(answer.Payload) == "*" && strings.TrimSpace(allowed.Payload) != "*" {
+				answer.Payload = strings.TrimSpace(allowed.Payload)
+			}
+			if !sdpRTCPFeedbackPayloadAllowed(answer.Payload, payloads) {
+				continue
+			}
+			key := strings.ToLower(answer.SDPValue())
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, answer)
+		}
+	}
+	return out
+}
+
+func RewriteSDPRTCPFeedback(body []byte, feedback []SDPRTCPFeedbackAttribute) []byte {
+	lines := sdpSecurityLines(body)
+	attrs := sdpRTCPFeedbackAttributeLines(feedback)
+	out := make([]string, 0, len(lines)+len(attrs))
+	inAudio := false
+	inserted := false
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "m=") {
+			if inAudio && !inserted {
+				out = append(out, attrs...)
+			}
+			inAudio = false
+			fields := strings.Fields(line)
+			if len(fields) > 0 && strings.EqualFold(fields[0], "m=audio") {
+				inAudio = true
+				inserted = true
+				out = append(out, line)
+				out = append(out, attrs...)
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
+		if inAudio && strings.HasPrefix(lower, "a=rtcp-fb:") {
+			continue
+		}
+		out = append(out, line)
+	}
+	if inAudio && !inserted {
+		out = append(out, attrs...)
+	}
+	return []byte(strings.Join(out, "\r\n") + "\r\n")
 }
 
 func rtcpFeedbackEvents(direction RTCPFeedbackDirection, packet rtcp.Packet) []RTCPFeedbackEvent {
@@ -267,4 +429,94 @@ func rtcpPacketType(packet rtcp.Packet) string {
 	name = strings.TrimPrefix(name, "*")
 	name = strings.TrimPrefix(name, "rtcp.")
 	return name
+}
+
+func sdpRTCPFeedbackAttributeLines(feedback []SDPRTCPFeedbackAttribute) []string {
+	out := make([]string, 0, len(feedback))
+	seen := make(map[string]bool, len(feedback))
+	for _, attr := range feedback {
+		if value := attr.SDPValue(); value != "" {
+			line := "a=rtcp-fb:" + value
+			key := strings.ToLower(line)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func cloneSDPRTCPFeedbackAttributes(in []SDPRTCPFeedbackAttribute) []SDPRTCPFeedbackAttribute {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SDPRTCPFeedbackAttribute, 0, len(in))
+	for _, attr := range in {
+		out = append(out, SDPRTCPFeedbackAttribute{
+			Payload:   strings.TrimSpace(attr.Payload),
+			Type:      strings.TrimSpace(attr.Type),
+			Parameter: strings.TrimSpace(attr.Parameter),
+		})
+	}
+	return out
+}
+
+func filterSDPRTCPFeedbackPayloads(in []SDPRTCPFeedbackAttribute, payloads []int) []SDPRTCPFeedbackAttribute {
+	var out []SDPRTCPFeedbackAttribute
+	seen := make(map[string]bool)
+	for _, attr := range in {
+		if !sdpRTCPFeedbackPayloadAllowed(attr.Payload, payloads) {
+			continue
+		}
+		key := strings.ToLower(attr.SDPValue())
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, attr)
+	}
+	return out
+}
+
+func sdpRTCPFeedbackCompatible(offer, local SDPRTCPFeedbackAttribute) bool {
+	if offer.SDPValue() == "" || local.SDPValue() == "" {
+		return false
+	}
+	offerPayload := strings.TrimSpace(offer.Payload)
+	localPayload := strings.TrimSpace(local.Payload)
+	if offerPayload != "*" && localPayload != "*" && offerPayload != localPayload {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(offer.Type), strings.TrimSpace(local.Type)) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(offer.Parameter), strings.TrimSpace(local.Parameter))
+}
+
+func sdpRTCPFeedbackPayloadAllowed(payload string, payloads []int) bool {
+	payload = strings.TrimSpace(payload)
+	if payload == "*" || len(payloads) == 0 {
+		return true
+	}
+	want, err := strconv.Atoi(payload)
+	if err != nil {
+		return false
+	}
+	for _, candidate := range payloads {
+		if candidate == want {
+			return true
+		}
+	}
+	return false
+}
+
+func validSDPRTCPFeedbackPayload(payload string) bool {
+	payload = strings.TrimSpace(payload)
+	if payload == "*" {
+		return true
+	}
+	value, err := strconv.Atoi(payload)
+	return err == nil && value >= 0 && value <= 127
 }

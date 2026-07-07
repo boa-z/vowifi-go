@@ -144,6 +144,87 @@ func TestStartEmergencyAddressUpdateHTTPDigestAKAResyncThenFreshNonce(t *testing
 	}
 }
 
+func TestStartEmergencyAddressUpdateAnswersProxyDigestAKAChallengeVariants(t *testing.T) {
+	rawNonce := append(bytesFrom(0x12, 16), bytesFrom(0x42, 16)...)
+	challenge := `dIgEsT realm="e911,proxy", nonce="` + base64.StdEncoding.EncodeToString(rawNonce) + `", algorithm=akav2-md5, qop="AUTH-INT", qop=AUTH, opaque="opq,one", stale=TRUE`
+	successResp := &HTTPResponse{
+		StatusCode: 200,
+		Headers: []HeaderPair{{
+			Key:   "Proxy-Authentication-Info",
+			Value: `qop=auth, nextnonce="next,proxy"`,
+		}},
+		Body: []byte(`{"status":1000,"websheet-url":"https://example.test/address?ok=proxy"}`),
+	}
+	client := &fakeHTTPClient{responses: []*HTTPResponse{
+		{
+			StatusCode: 407,
+			Headers: []HeaderPair{{
+				Key:   "proxy-authenticate",
+				Value: challenge,
+			}},
+		},
+		successResp,
+	}}
+	aka := &fakeAKAProvider{}
+
+	ws, err := StartEmergencyAddressUpdate(context.Background(), Request{
+		Carrier: carrier.EffectiveCarrierConfig{
+			E911: carrier.E911Config{
+				Provider:            "att-ts43",
+				Websheet:            "https://example.test/websheet",
+				EntitlementEndpoint: "https://example.test/entitlement",
+			},
+		},
+		Identity:    Identity{IMSI: "310280233641503", IMEI: "356306952701762", MCC: "310", MNC: "280", SIPUsername: "sip:user@example"},
+		AKAProvider: aka,
+		Client:      client,
+		Random:      bytes.NewReader(bytes.Repeat([]byte{0x88}, 16)),
+	})
+	if err != nil {
+		t.Fatalf("StartEmergencyAddressUpdate() error = %v", err)
+	}
+	if ws.URL != "https://example.test/address?ok=proxy" {
+		t.Fatalf("URL=%q", ws.URL)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("requests=%d, want initial request and proxy digest retry", len(client.requests))
+	}
+	if headerValue(client.requests[1].Headers, "Authorization") != "" {
+		t.Fatalf("origin Authorization unexpectedly set: %+v", client.requests[1].Headers)
+	}
+	auth := headerValue(client.requests[1].Headers, "Proxy-Authorization")
+	if auth == "" {
+		t.Fatalf("missing Proxy-Authorization: %+v", client.requests[1].Headers)
+	}
+	parsed, err := voiceclient.ParseDigestAuthorization(auth)
+	if err != nil {
+		t.Fatalf("ParseDigestAuthorization() error = %v", err)
+	}
+	if parsed.Algorithm != "AKAv2-MD5" || parsed.QOP != "auth" || parsed.Opaque != "opq,one" ||
+		parsed.Realm != "e911,proxy" || parsed.URI != "/entitlement" || parsed.CNonce != strings.Repeat("88", 16) {
+		t.Fatalf("Proxy-Authorization=%+v", parsed)
+	}
+	if !bytes.Equal(aka.rand, bytesFrom(0x12, 16)) || !bytes.Equal(aka.autn, bytesFrom(0x42, 16)) {
+		t.Fatalf("AKA RAND/AUTN=%x/%x", aka.rand, aka.autn)
+	}
+	if got := entitlementHTTPDigestNextNonce(successResp.Headers, "Proxy-Authorization"); got != "next,proxy" {
+		t.Fatalf("nextnonce=%q, want next,proxy", got)
+	}
+}
+
+func TestEntitlementHTTPDigestAuthenticationInfoNextNoncePriority(t *testing.T) {
+	headers := []HeaderPair{
+		{Key: "Authentication-Info", Value: `nextnonce="origin,next", qop=auth`},
+		{Key: "Proxy-Authentication-Info", Value: `qop=auth, nextnonce="proxy,next"`},
+	}
+	if got := entitlementHTTPDigestNextNonce(headers, "Authorization"); got != "origin,next" {
+		t.Fatalf("origin nextnonce=%q", got)
+	}
+	if got := entitlementHTTPDigestNextNonce(headers, "Proxy-Authorization"); got != "proxy,next" {
+		t.Fatalf("proxy nextnonce=%q", got)
+	}
+}
+
 type sequenceE911AKAResult struct {
 	result sim.AKAResult
 	err    error

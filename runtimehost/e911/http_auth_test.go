@@ -71,6 +71,38 @@ func TestHTTPAuthenticateChallengeParserSplitsMultipleSchemes(t *testing.T) {
 	}
 }
 
+func TestHTTPAuthenticateChallengeParserMergesDuplicateParams(t *testing.T) {
+	header := `dIgEsT realm="e911,ims", nonce="abc,def", algorithm=akav1-md5, qop="AUTH-INT", qop=AUTH, stale=false, stale=TRUE, opaque="opq,one"`
+	challenges := httpAuthenticationChallenges(http.StatusUnauthorized, []HeaderPair{{Key: "www-authenticate", Value: header}})
+	if len(challenges) != 1 {
+		t.Fatalf("challenges=%+v", challenges)
+	}
+	challenge := challenges[0]
+	if challenge.Header != "Www-Authenticate" || challenge.Scheme != "dIgEsT" {
+		t.Fatalf("challenge=%+v", challenge)
+	}
+	if challenge.Params["realm"] != "e911,ims" || challenge.Params["nonce"] != "abc,def" || challenge.Params["opaque"] != "opq,one" {
+		t.Fatalf("quoted params=%+v", challenge.Params)
+	}
+	if challenge.Params["qop"] != "AUTH-INT,AUTH" || challenge.Params["stale"] != "true" || challenge.Params["algorithm"] != "akav1-md5" {
+		t.Fatalf("merged params=%+v", challenge.Params)
+	}
+}
+
+func TestHTTPAuthenticateChallengeParserClassifiesProxyHeader(t *testing.T) {
+	challenges := httpAuthenticationChallenges(http.StatusProxyAuthRequired, []HeaderPair{
+		{Key: "www-authenticate", Value: `Digest realm="origin", nonce="ignored"`},
+		{Key: "proxy-authenticate", Value: `Digest realm="proxy", nonce="proxy,nonce"`},
+	})
+	if len(challenges) != 1 {
+		t.Fatalf("challenges=%+v", challenges)
+	}
+	challenge := challenges[0]
+	if challenge.Header != "Proxy-Authenticate" || challenge.Params["realm"] != "proxy" || challenge.Params["nonce"] != "proxy,nonce" {
+		t.Fatalf("proxy challenge=%+v", challenge)
+	}
+}
+
 func TestDefaultHTTPClientCapturesResponseHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("WWW-Authenticate", `Digest realm="e911.example", nonce="header-copy"`)

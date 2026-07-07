@@ -799,19 +799,29 @@ func defaultIMSRealm(cfg IMSRegistrationConfig) string {
 func cfgMCCMNC(cfg IMSRegistrationConfig) (string, string) {
 	mcc := strings.TrimSpace(cfg.Profile.MCC)
 	mnc := strings.TrimSpace(cfg.Profile.MNC)
+	imsi := strings.TrimSpace(cfg.Profile.IMSI)
 	if cfg.Prepared != nil {
+		if imsi == "" {
+			imsi = strings.TrimSpace(cfg.Prepared.Profile.IMSI)
+		}
 		if mcc == "" {
 			mcc = strings.TrimSpace(cfg.Prepared.Profile.MCC)
 		}
 		if mnc == "" {
 			mnc = strings.TrimSpace(cfg.Prepared.Profile.MNC)
 		}
+		if mcc == "" {
+			mcc = strings.TrimSpace(cfg.Prepared.EffectiveCarrier.MCC)
+		}
+		if mnc == "" {
+			mnc = strings.TrimSpace(cfg.Prepared.EffectiveCarrier.MNC)
+		}
 	}
-	if mcc == "" && len(strings.TrimSpace(cfg.Profile.IMSI)) >= 3 {
-		mcc = strings.TrimSpace(cfg.Profile.IMSI)[:3]
+	if mcc == "" && len(imsi) >= 3 {
+		mcc = imsi[:3]
 	}
-	if mnc == "" && len(strings.TrimSpace(cfg.Profile.IMSI)) >= 6 {
-		mnc = strings.TrimSpace(cfg.Profile.IMSI)[3:6]
+	if mnc == "" && len(imsi) >= 6 {
+		mnc = imsi[3:6]
 	}
 	trimmedMNC := strings.TrimLeft(mnc, "0")
 	if trimmedMNC == "" && mnc != "" {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -18,6 +19,9 @@ const (
 	SecurityEncryptionAlgorithmAES = "aes-cbc"
 	DefaultSecurityPortC           = 5062
 	DefaultSecurityPortS           = 5063
+
+	defaultSecurityIPSecProtocol = "esp"
+	defaultSecurityMode          = "trans"
 )
 
 type SecurityAgreement struct {
@@ -181,7 +185,7 @@ func BuildIMSSecurityAssociationPlan(agreement SecurityAgreement) (IMSSecurityAs
 	if agreement.SPIClient == 0 || agreement.SPIServer == 0 || agreement.PortClient == 0 || agreement.PortServer == 0 {
 		return IMSSecurityAssociationPlan{}, false
 	}
-	mode := firstNonEmpty(agreement.Parameters["mode"], agreement.Parameters["mod"], "trans")
+	mode := firstNonEmpty(agreement.Parameters["mode"], agreement.Parameters["mod"], defaultSecurityMode)
 	return IMSSecurityAssociationPlan{
 		Protocol:            agreement.Protocol,
 		Mode:                strings.ToLower(strings.TrimSpace(mode)),
@@ -232,6 +236,7 @@ func (a SecurityAgreement) HeaderValue() string {
 	if a.PortServer > 0 {
 		parts = append(parts, "port-s="+strconv.Itoa(a.PortServer))
 	}
+	parts = appendSecurityAgreementParameters(parts, a.Parameters)
 	return strings.Join(parts, ";")
 }
 
@@ -532,6 +537,14 @@ func securityAgreementCompatible(offer, client SecurityAgreement) bool {
 	if !strings.EqualFold(offer.EncryptionAlgorithm, client.EncryptionAlgorithm) {
 		return false
 	}
+	if strings.EqualFold(offer.Protocol, DefaultSecurityProtocol) {
+		if !strings.EqualFold(securityAgreementIPSecProtocol(offer), securityAgreementIPSecProtocol(client)) {
+			return false
+		}
+		if !strings.EqualFold(securityAgreementMode(offer), securityAgreementMode(client)) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -547,7 +560,74 @@ func securityQValue(value string) int {
 	if raw > 1 {
 		raw = 1
 	}
-	return int(raw * 10)
+	return int(raw*1000 + 0.5)
+}
+
+func securityAgreementIPSecProtocol(agreement SecurityAgreement) string {
+	protocol := firstNonEmpty(agreement.Parameters["prot"], defaultSecurityIPSecProtocol)
+	return strings.ToLower(strings.TrimSpace(protocol))
+}
+
+func securityAgreementMode(agreement SecurityAgreement) string {
+	mode := firstNonEmpty(agreement.Parameters["mode"], agreement.Parameters["mod"], defaultSecurityMode)
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "trans", "transport":
+		return defaultSecurityMode
+	case "tun", "tunnel":
+		return "tun"
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func appendSecurityAgreementParameters(parts []string, params map[string]string) []string {
+	if len(params) == 0 {
+		return parts
+	}
+	extras := make(map[string]string)
+	for key, value := range params {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" || isSecurityAgreementStructuredParameter(key) {
+			continue
+		}
+		extras[key] = strings.TrimSpace(value)
+	}
+	for _, key := range []string{"prot", "mod", "mode", "q"} {
+		value, ok := extras[key]
+		if !ok {
+			continue
+		}
+		parts = append(parts, key+"="+securityAgreementParameterValue(value))
+		delete(extras, key)
+	}
+	keys := make([]string, 0, len(extras))
+	for key := range extras {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		parts = append(parts, key+"="+securityAgreementParameterValue(extras[key]))
+	}
+	return parts
+}
+
+func isSecurityAgreementStructuredParameter(key string) bool {
+	switch key {
+	case "alg", "ealg", "spi-c", "spi-s", "port-c", "port-s":
+		return true
+	default:
+		return false
+	}
+}
+
+func securityAgreementParameterValue(value string) string {
+	if value == "" {
+		return `""`
+	}
+	if strings.ContainsAny(value, " \t;,\"") {
+		return `"` + quote(value) + `"`
+	}
+	return value
 }
 
 func parseSecurityUint32(value string) uint32 {

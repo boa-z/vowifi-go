@@ -120,12 +120,57 @@ func parseHTTPAuthParams(s string) map[string]string {
 		if key == "" {
 			continue
 		}
-		params[key] = unquoteHTTPAuthValue(value)
+		setHTTPAuthParam(params, key, unquoteHTTPAuthValue(value))
 	}
 	if len(params) == 0 {
 		return nil
 	}
 	return params
+}
+
+func setHTTPAuthParam(params map[string]string, key, value string) {
+	if params == nil || key == "" {
+		return
+	}
+	if previous, ok := params[key]; ok {
+		params[key] = mergeHTTPAuthParam(key, previous, value)
+		return
+	}
+	params[key] = value
+}
+
+func mergeHTTPAuthParam(key, previous, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return previous
+	}
+	switch key {
+	case "qop":
+		return mergeHTTPAuthTokenList(previous, value)
+	case "stale":
+		if strings.EqualFold(previous, "true") || strings.EqualFold(value, "true") {
+			return "true"
+		}
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return value
+	}
+}
+
+func mergeHTTPAuthTokenList(values ...string) string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			token := strings.TrimSpace(part)
+			key := strings.ToLower(token)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, token)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 func splitHTTPAuthParams(s string) []string {
@@ -253,6 +298,17 @@ func unquoteHTTPAuthValue(value string) string {
 	}
 	if escaped {
 		out.WriteRune('\\')
+	}
+	return out.String()
+}
+
+func quoteHTTPAuthValue(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		if r == '\\' || r == '"' {
+			out.WriteRune('\\')
+		}
+		out.WriteRune(r)
 	}
 	return out.String()
 }

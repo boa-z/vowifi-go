@@ -497,6 +497,42 @@ func TestParseAndSelectSecurityAgreement(t *testing.T) {
 	if client != "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=7001;spi-s=7002;port-c=6000;port-s=6001" {
 		t.Fatalf("Security-Client=%q", client)
 	}
+	client = BuildSecurityClientHeader(SecurityAgreement{
+		SPIClient:  7001,
+		SPIServer:  7002,
+		PortClient: 6000,
+		PortServer: 6001,
+		Parameters: map[string]string{
+			"prot": "esp",
+			"mod":  "trans",
+			"q":    "0.5",
+			"foo":  "bar baz",
+		},
+	})
+	if client != `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=7001;spi-s=7002;port-c=6000;port-s=6001;prot=esp;mod=trans;q=0.5;foo="bar baz"` {
+		t.Fatalf("Security-Client with params=%q", client)
+	}
+}
+
+func TestParseSecurityAgreementsHandlesIMSParameters(t *testing.T) {
+	agreements := ParseSecurityAgreements([]string{
+		`IPSEC-3GPP;ALG="HMAC-SHA-1-96";EALG="NULL";SPI-C="111";SPI-S=222;PORT-C=5062;PORT-S=5063;Q=0.950;PROT=ESP;MOD=TRANS, ` +
+			`ipsec-3gpp;alg=hmac-md5-96;ealg=aes-cbc;spi-c=333;spi-s=444;port-c=5064;port-s=5065;q=0.900;prot=esp;mod=trans`,
+	})
+	if len(agreements) != 2 {
+		t.Fatalf("ParseSecurityAgreements() len=%d, want 2: %+v", len(agreements), agreements)
+	}
+	first := agreements[0]
+	if first.Protocol != DefaultSecurityProtocol || first.Algorithm != DefaultSecurityAlgorithm || first.EncryptionAlgorithm != DefaultSecurityEAlg ||
+		first.SPIClient != 111 || first.SPIServer != 222 || first.PortClient != 5062 || first.PortServer != 5063 ||
+		first.Parameters["q"] != "0.950" || !strings.EqualFold(first.Parameters["prot"], "esp") || !strings.EqualFold(first.Parameters["mod"], "trans") {
+		t.Fatalf("first agreement=%+v", first)
+	}
+	second := agreements[1]
+	if second.Algorithm != SecurityAlgorithmHMACMD596 || second.EncryptionAlgorithm != SecurityEncryptionAlgorithmAES ||
+		second.SPIClient != 333 || second.SPIServer != 444 || second.PortClient != 5064 || second.PortServer != 5065 {
+		t.Fatalf("second agreement=%+v", second)
+	}
 }
 
 func TestBuildAndSelectSecurityClientProposals(t *testing.T) {
@@ -549,6 +585,42 @@ func TestSelectSecurityAgreementSkipsIncompatibleOffers(t *testing.T) {
 		`ipsec-3gpp;q=0.9;alg=hmac-md5-96;ealg=null;spi-c=333;spi-s=444`,
 	}, SecurityAgreement{Protocol: "ipsec-3gpp", Algorithm: "hmac-sha-1-96", EncryptionAlgorithm: "null"}); ok {
 		t.Fatalf("SelectSecurityAgreement() selected incompatible offer: %+v", selected)
+	}
+}
+
+func TestSelectSecurityAgreementUsesPreciseQAndRepeats(t *testing.T) {
+	selected, ok := SelectSecurityAgreement([]string{
+		`ipsec-3gpp;q=0.901;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063;prot=esp;mod=trans`,
+		`ipsec-3gpp;q=0.950;alg=hmac-sha-1-96;ealg=null;spi-c=333;spi-s=444;port-c=5064;port-s=5065;prot=esp;mod=trans`,
+		`ipsec-3gpp;q=0.950;alg=hmac-sha-1-96;ealg=null;spi-c=555;spi-s=666;port-c=5066;port-s=5067;prot=esp;mod=trans`,
+	}, SecurityAgreement{
+		Protocol:            DefaultSecurityProtocol,
+		Algorithm:           DefaultSecurityAlgorithm,
+		EncryptionAlgorithm: DefaultSecurityEAlg,
+	})
+	if !ok {
+		t.Fatal("SelectSecurityAgreement() ok=false")
+	}
+	if selected.SPIClient != 333 || selected.SPIServer != 444 || selected.Parameters["q"] != "0.950" {
+		t.Fatalf("selected=%+v", selected)
+	}
+}
+
+func TestSelectSecurityAgreementMatchesProtAndMode(t *testing.T) {
+	selected, ok := SelectSecurityAgreement([]string{
+		`ipsec-3gpp;q=1.0;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063;prot=ah;mod=trans`,
+		`ipsec-3gpp;q=0.9;alg=hmac-sha-1-96;ealg=null;spi-c=333;spi-s=444;port-c=5064;port-s=5065;prot=esp;mod=tun`,
+		`ipsec-3gpp;q=0.1;alg=hmac-sha-1-96;ealg=null;spi-c=555;spi-s=666;port-c=5066;port-s=5067;prot=ESP;mod=TRANSPORT`,
+	}, SecurityAgreement{
+		Protocol:            DefaultSecurityProtocol,
+		Algorithm:           DefaultSecurityAlgorithm,
+		EncryptionAlgorithm: DefaultSecurityEAlg,
+	})
+	if !ok {
+		t.Fatal("SelectSecurityAgreement() ok=false")
+	}
+	if selected.SPIClient != 555 || !strings.EqualFold(selected.Parameters["prot"], "esp") || !strings.EqualFold(selected.Parameters["mod"], "transport") {
+		t.Fatalf("selected=%+v", selected)
 	}
 }
 

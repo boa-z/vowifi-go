@@ -1,10 +1,81 @@
 package voicehost
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/pion/rtcp"
 )
+
+func TestParseAndSelectSDPRTCPFeedbackAttributes(t *testing.T) {
+	raw := []byte("v=0\r\n" +
+		"c=IN IP4 203.0.113.8\r\n" +
+		"m=audio 49170 RTP/SAVPF 96 110 111\r\n" +
+		"a=rtcp-fb:* nack pli\r\n" +
+		"a=rtcp-fb:96 goog-remb\r\n" +
+		"a=rtcp-fb:110 transport-cc\r\n" +
+		"a=rtcp-fb:111 nack\r\n")
+	attrs, err := ParseSDPRTCPFeedbackAttributes(raw)
+	if err != nil {
+		t.Fatalf("ParseSDPRTCPFeedbackAttributes() error = %v", err)
+	}
+	if len(attrs) != 4 || attrs[0].Payload != "*" || attrs[0].Type != "nack" || attrs[0].Parameter != "pli" {
+		t.Fatalf("attrs=%+v", attrs)
+	}
+
+	selected := SelectSDPRTCPFeedbackAnswer(attrs, []SDPRTCPFeedbackAttribute{
+		{Payload: "96", Type: "nack", Parameter: "pli"},
+		{Payload: "*", Type: "goog-remb"},
+		{Payload: "*", Type: "transport-cc"},
+	}, []int{96, 110})
+	if len(selected) != 3 {
+		t.Fatalf("selected=%+v", selected)
+	}
+	if selected[0].Payload != "96" || selected[0].Type != "nack" || selected[0].Parameter != "pli" {
+		t.Fatalf("selected[0]=%+v", selected[0])
+	}
+	if selected[1].Payload != "96" || selected[1].Type != "goog-remb" {
+		t.Fatalf("selected[1]=%+v", selected[1])
+	}
+	if selected[2].Payload != "110" || selected[2].Type != "transport-cc" {
+		t.Fatalf("selected[2]=%+v", selected[2])
+	}
+
+	_, _, err = ParseSDPRTCPFeedbackLine("a=rtcp-fb:abc nack")
+	if !errors.Is(err, ErrInvalidSDPSecurity) {
+		t.Fatalf("ParseSDPRTCPFeedbackLine(invalid) err=%v, want ErrInvalidSDPSecurity", err)
+	}
+}
+
+func TestRewriteSDPRTCPFeedbackReplacesOnlyAudioFeedback(t *testing.T) {
+	body := []byte("v=0\r\n" +
+		"c=IN IP4 203.0.113.8\r\n" +
+		"m=audio 49170 RTP/SAVPF 96\r\n" +
+		"a=rtcp-fb:* nack\r\n" +
+		"a=rtpmap:96 AMR/8000\r\n" +
+		"m=video 50000 RTP/SAVPF 120\r\n" +
+		"a=rtcp-fb:120 nack\r\n")
+	rewritten := string(RewriteSDPRTCPFeedback(body, []SDPRTCPFeedbackAttribute{
+		{Payload: "96", Type: "nack", Parameter: "pli"},
+		{Payload: "*", Type: "trr-int", Parameter: "100"},
+	}))
+	for _, want := range []string{
+		"m=audio 49170 RTP/SAVPF 96\r\n",
+		"a=rtcp-fb:96 nack pli\r\n",
+		"a=rtcp-fb:* trr-int 100\r\n",
+		"a=rtpmap:96 AMR/8000\r\n",
+		"m=video 50000 RTP/SAVPF 120\r\n",
+		"a=rtcp-fb:120 nack\r\n",
+	} {
+		if !strings.Contains(rewritten, want) {
+			t.Fatalf("rewritten missing %q:\n%s", want, rewritten)
+		}
+	}
+	if strings.Contains(rewritten, "a=rtcp-fb:* nack\r\n") {
+		t.Fatalf("rewritten kept old audio feedback:\n%s", rewritten)
+	}
+}
 
 func TestInspectRTCPFeedbackReportsReceptionBlocks(t *testing.T) {
 	raw, err := rtcp.Marshal([]rtcp.Packet{

@@ -23,10 +23,15 @@ type SDPFingerprintAttribute struct {
 }
 
 type SDPSecurityInfo struct {
-	RTPProfile   string
-	Crypto       []SDPCryptoAttribute
-	Fingerprints []SDPFingerprintAttribute
-	Setup        string
+	RTPProfile        string
+	Crypto            []SDPCryptoAttribute
+	Fingerprints      []SDPFingerprintAttribute
+	Setup             string
+	RTCPMux           bool
+	RTCPMuxOnly       bool
+	RTCPReducedSize   bool
+	RTCPFeedback      []SDPRTCPFeedbackAttribute
+	UnknownAttributes []string
 }
 
 type SDPSecurityAnswerOptions struct {
@@ -92,6 +97,13 @@ func ParseSDPSecurity(body []byte) (SDPSecurityInfo, error) {
 					return SDPSecurityInfo{}, err
 				}
 				session.Setup = setup
+				continue
+			}
+			if feedback, ok, err := ParseSDPRTCPFeedbackLine(line); ok || err != nil {
+				if err != nil {
+					return SDPSecurityInfo{}, err
+				}
+				session.RTCPFeedback = append(session.RTCPFeedback, feedback)
 			}
 		case inAudio:
 			if crypto, ok, err := parseSDPCryptoLine(line); ok || err != nil {
@@ -113,6 +125,29 @@ func ParseSDPSecurity(body []byte) (SDPSecurityInfo, error) {
 					return SDPSecurityInfo{}, err
 				}
 				out.Setup = setup
+				continue
+			}
+			if feedback, ok, err := ParseSDPRTCPFeedbackLine(line); ok || err != nil {
+				if err != nil {
+					return SDPSecurityInfo{}, err
+				}
+				out.RTCPFeedback = append(out.RTCPFeedback, feedback)
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(line)) {
+			case "a=rtcp-mux":
+				out.RTCPMux = true
+				continue
+			case "a=rtcp-mux-only":
+				out.RTCPMux = true
+				out.RTCPMuxOnly = true
+				continue
+			case "a=rtcp-rsize":
+				out.RTCPReducedSize = true
+				continue
+			}
+			if shouldPreserveUnknownSDPSecurityAttribute(line) {
+				out.UnknownAttributes = append(out.UnknownAttributes, strings.TrimSpace(line))
 			}
 		}
 	}
@@ -125,6 +160,9 @@ func ParseSDPSecurity(body []byte) (SDPSecurityInfo, error) {
 	if strings.TrimSpace(out.Setup) == "" {
 		out.Setup = session.Setup
 	}
+	if len(out.RTCPFeedback) == 0 {
+		out.RTCPFeedback = session.RTCPFeedback
+	}
 	return out, nil
 }
 
@@ -135,21 +173,21 @@ func SelectSDPSecurityAnswer(offer SDPSecurityInfo, options SDPSecurityAnswerOpt
 	}
 	if !options.PreferCrypto {
 		if answer, ok, err := selectSDPFingerprintAnswer(offer, options, profile); ok || err != nil {
-			return answer, err
+			return withSDPTransportAttributes(answer, offer), err
 		}
 	}
 	if answer, ok := selectSDPCryptoAnswer(offer, options, profile); ok {
-		return answer, nil
+		return withSDPTransportAttributes(answer, offer), nil
 	}
 	if options.PreferCrypto {
 		if answer, ok, err := selectSDPFingerprintAnswer(offer, options, profile); ok || err != nil {
-			return answer, err
+			return withSDPTransportAttributes(answer, offer), err
 		}
 	}
 	if offer.HasSecurityAttributes() {
 		return SDPSecurityInfo{}, fmt.Errorf("%w: no compatible SDP security attributes", ErrSDPSecurityNegotiation)
 	}
-	return SDPSecurityInfo{RTPProfile: profile}, nil
+	return withSDPTransportAttributes(SDPSecurityInfo{RTPProfile: profile}, offer), nil
 }
 
 func BuildSDPAnswerWithSecurity(info SDPInfo, security SDPSecurityInfo) []byte {
@@ -164,11 +202,25 @@ func (s SDPSecurityInfo) IsZero() bool {
 	return strings.TrimSpace(s.RTPProfile) == "" &&
 		len(s.Crypto) == 0 &&
 		len(s.Fingerprints) == 0 &&
-		strings.TrimSpace(s.Setup) == ""
+		strings.TrimSpace(s.Setup) == "" &&
+		!s.RTCPMux &&
+		!s.RTCPMuxOnly &&
+		!s.RTCPReducedSize &&
+		len(s.RTCPFeedback) == 0 &&
+		len(s.UnknownAttributes) == 0
 }
 
 func (s SDPSecurityInfo) HasSecurityAttributes() bool {
 	return len(s.Crypto) > 0 || len(s.Fingerprints) > 0 || strings.TrimSpace(s.Setup) != ""
+}
+
+func withSDPTransportAttributes(answer, offer SDPSecurityInfo) SDPSecurityInfo {
+	answer.RTCPMux = offer.RTCPMux
+	answer.RTCPMuxOnly = offer.RTCPMuxOnly
+	answer.RTCPReducedSize = offer.RTCPReducedSize
+	answer.RTCPFeedback = cloneSDPRTCPFeedbackAttributes(offer.RTCPFeedback)
+	answer.UnknownAttributes = cloneSDPAttributeLines(offer.UnknownAttributes)
+	return answer
 }
 
 func (a SDPCryptoAttribute) SDPValue() string {
@@ -198,20 +250,49 @@ func applySDPSecurity(body []byte, security SDPSecurityInfo) []byte {
 	profile := strings.TrimSpace(security.RTPProfile)
 	out := make([]string, 0, len(lines)+len(attrs))
 	inserted := false
+	inAudio := false
+	skip := security.sdpRewriteSkipOptions()
+	insertedAttr := make(map[string]bool, len(attrs))
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		if !inserted && strings.HasPrefix(strings.ToLower(line), "m=audio ") {
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "m=") {
+			if inAudio {
+				inAudio = false
+			}
 			fields := strings.Fields(line)
-			if profile != "" && len(fields) >= 3 {
-				fields[2] = profile
-				line = strings.Join(fields, " ")
+			audio := len(fields) > 0 && strings.EqualFold(fields[0], "m=audio")
+			if audio {
+				inAudio = true
+			}
+			if !inserted && audio {
+				if profile != "" && len(fields) >= 3 {
+					fields[2] = profile
+					line = strings.Join(fields, " ")
+				}
+				out = append(out, line)
+				for _, attr := range attrs {
+					out = append(out, attr)
+					insertedAttr[strings.ToLower(attr)] = true
+				}
+				inserted = true
+				continue
 			}
 			out = append(out, line)
-			out = append(out, attrs...)
-			inserted = true
 			continue
+		}
+		if !inserted && skip.beforeMedia(line) {
+			continue
+		}
+		if inAudio {
+			if insertedAttr[strings.ToLower(strings.TrimSpace(line))] {
+				continue
+			}
+			if skip.audio(line) {
+				continue
+			}
 		}
 		out = append(out, line)
 	}
@@ -221,20 +302,120 @@ func applySDPSecurity(body []byte, security SDPSecurityInfo) []byte {
 	return []byte(strings.Join(out, "\r\n") + "\r\n")
 }
 
+type sdpSecurityRewriteSkipOptions struct {
+	crypto            bool
+	fingerprint       bool
+	setup             bool
+	rtcpFeedback      bool
+	rtcpMux           bool
+	rtcpMuxOnly       bool
+	rtcpReducedSize   bool
+	unknownAttributes map[string]bool
+}
+
+func (s SDPSecurityInfo) sdpRewriteSkipOptions() sdpSecurityRewriteSkipOptions {
+	out := sdpSecurityRewriteSkipOptions{
+		crypto:            len(s.Crypto) > 0,
+		fingerprint:       len(s.Fingerprints) > 0,
+		setup:             strings.TrimSpace(s.Setup) != "",
+		rtcpFeedback:      len(s.RTCPFeedback) > 0,
+		rtcpMux:           s.RTCPMux || s.RTCPMuxOnly,
+		rtcpMuxOnly:       s.RTCPMuxOnly,
+		rtcpReducedSize:   s.RTCPReducedSize,
+		unknownAttributes: make(map[string]bool, len(s.UnknownAttributes)),
+	}
+	for _, line := range s.UnknownAttributes {
+		if line = strings.TrimSpace(line); line != "" {
+			out.unknownAttributes[strings.ToLower(line)] = true
+		}
+	}
+	return out
+}
+
+func (o sdpSecurityRewriteSkipOptions) beforeMedia(line string) bool {
+	line = strings.TrimSpace(line)
+	lower := strings.ToLower(line)
+	switch {
+	case o.fingerprint && strings.HasPrefix(lower, "a=fingerprint:"):
+		return true
+	case o.setup && strings.HasPrefix(lower, "a=setup:"):
+		return true
+	case o.rtcpFeedback && strings.HasPrefix(lower, "a=rtcp-fb:"):
+		return true
+	default:
+		return false
+	}
+}
+
+func (o sdpSecurityRewriteSkipOptions) audio(line string) bool {
+	line = strings.TrimSpace(line)
+	lower := strings.ToLower(line)
+	switch {
+	case o.crypto && strings.HasPrefix(lower, "a=crypto:"):
+		return true
+	case o.fingerprint && strings.HasPrefix(lower, "a=fingerprint:"):
+		return true
+	case o.setup && strings.HasPrefix(lower, "a=setup:"):
+		return true
+	case o.rtcpFeedback && strings.HasPrefix(lower, "a=rtcp-fb:"):
+		return true
+	case o.rtcpMux && lower == "a=rtcp-mux":
+		return true
+	case o.rtcpMuxOnly && lower == "a=rtcp-mux-only":
+		return true
+	case o.rtcpReducedSize && lower == "a=rtcp-rsize":
+		return true
+	case o.unknownAttributes[lower]:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s SDPSecurityInfo) sdpAttributeLines() []string {
-	out := make([]string, 0, len(s.Crypto)+len(s.Fingerprints)+1)
+	out := make([]string, 0, len(s.Crypto)+len(s.Fingerprints)+len(s.RTCPFeedback)+len(s.UnknownAttributes)+4)
+	seen := make(map[string]bool)
+	appendLine := func(line string) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return
+		}
+		key := strings.ToLower(line)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, line)
+	}
 	for _, crypto := range s.Crypto {
 		if value := crypto.SDPValue(); value != "" {
-			out = append(out, "a=crypto:"+value)
+			appendLine("a=crypto:" + value)
 		}
 	}
 	for _, fingerprint := range s.Fingerprints {
 		if value := fingerprint.SDPValue(); value != "" {
-			out = append(out, "a=fingerprint:"+value)
+			appendLine("a=fingerprint:" + value)
 		}
 	}
 	if setup := strings.TrimSpace(s.Setup); setup != "" {
-		out = append(out, "a=setup:"+setup)
+		appendLine("a=setup:" + setup)
+	}
+	if s.RTCPMux || s.RTCPMuxOnly {
+		appendLine("a=rtcp-mux")
+	}
+	if s.RTCPMuxOnly {
+		appendLine("a=rtcp-mux-only")
+	}
+	if s.RTCPReducedSize {
+		appendLine("a=rtcp-rsize")
+	}
+	for _, line := range sdpRTCPFeedbackAttributeLines(s.RTCPFeedback) {
+		appendLine(line)
+	}
+	for _, line := range s.UnknownAttributes {
+		if shouldPreserveUnknownSDPSecurityAttribute(line) {
+			appendLine(line)
+		}
 	}
 	return out
 }
@@ -297,6 +478,51 @@ func parseSDPSetupLine(line string) (string, bool, error) {
 		return "", true, fmt.Errorf("%w: unsupported setup role %q", ErrInvalidSDPSecurity, value)
 	}
 	return value, true, nil
+}
+
+func shouldPreserveUnknownSDPSecurityAttribute(line string) bool {
+	line = strings.TrimSpace(line)
+	lower := strings.ToLower(line)
+	if !strings.HasPrefix(lower, "a=") || len(line) <= len("a=") {
+		return false
+	}
+	switch {
+	case lower == "a=sendrecv" || lower == "a=sendonly" || lower == "a=recvonly" || lower == "a=inactive":
+		return false
+	case lower == "a=rtcp-mux" || lower == "a=rtcp-mux-only" || lower == "a=rtcp-rsize":
+		return false
+	case strings.HasPrefix(lower, "a=crypto:"):
+		return false
+	case strings.HasPrefix(lower, "a=fingerprint:"):
+		return false
+	case strings.HasPrefix(lower, "a=setup:"):
+		return false
+	case strings.HasPrefix(lower, "a=rtcp-fb:"):
+		return false
+	case strings.HasPrefix(lower, "a=rtcp:"):
+		return false
+	case strings.HasPrefix(lower, "a=rtpmap:"):
+		return false
+	case strings.HasPrefix(lower, "a=fmtp:"):
+		return false
+	case strings.HasPrefix(lower, "a=ptime:") || strings.HasPrefix(lower, "a=maxptime:"):
+		return false
+	default:
+		return true
+	}
+}
+
+func cloneSDPAttributeLines(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, line := range in {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 func validateSDPFingerprintAttribute(attr SDPFingerprintAttribute) error {

@@ -17,6 +17,10 @@ const (
 	IMSIdentitySourceISIM    = "isim"
 
 	IMSISourceProfile = "profile"
+	PLMNSourceIMSI    = "imsi"
+
+	IdentityFieldMCC = "mcc"
+	IdentityFieldMNC = "mnc"
 
 	IMEISourceProfile     = "profile"
 	IMEISourceDeviceID    = "device_id"
@@ -84,23 +88,24 @@ type PrepareStartInput struct {
 
 func NormalizeProfile(p Profile) Profile {
 	p.IMSI = strings.TrimSpace(p.IMSI)
-	p.MCC = strings.TrimSpace(p.MCC)
-	p.MNC = strings.TrimSpace(p.MNC)
+	p.MCC = normalizeMCC(p.MCC)
+	p.MNC = normalizeMNC(p.MNC)
 	p.IMEI = strings.TrimSpace(p.IMEI)
 	p.SMSC = strings.TrimSpace(p.SMSC)
-	if p.MCC == "" && len(p.IMSI) >= 3 {
-		p.MCC = p.IMSI[:3]
+	imsiMCC, imsiMNC := plmnFromIMSI(p.IMSI)
+	if p.MCC == "" {
+		p.MCC = imsiMCC
 	}
-	if p.MNC == "" && len(p.IMSI) >= 6 {
-		p.MNC = p.IMSI[3:6]
+	if p.MNC == "" {
+		p.MNC = imsiMNC
 	}
 	return p
 }
 
 func PrepareStart(in PrepareStartInput) (PreparedSession, error) {
-	profile := NormalizeProfile(in.Profile)
-	if profile.IMSI == "" {
-		return PreparedSession{}, errors.New("IMSI is empty")
+	profile, fallbacks, err := prepareProfile(in.Profile)
+	if err != nil {
+		return PreparedSession{}, err
 	}
 	effectiveCfg := carrier.ResolveEffectiveCarrierConfig(carrier.EffectiveCarrierConfigInput{
 		IMSI: profile.IMSI,
@@ -114,7 +119,6 @@ func PrepareStart(in PrepareStartInput) (PreparedSession, error) {
 		profile.MNC = effectiveCfg.MNC
 	}
 	imeiSource := IMEISourceProfile
-	var fallbacks []FallbackMetadata
 	if profile.IMEI == "" {
 		if imei := ExtractIMEI(in.DeviceID); imei != "" {
 			profile.IMEI = imei
@@ -210,6 +214,107 @@ func ExtractIMEI(value string) string {
 	return ""
 }
 
+func prepareProfile(p Profile) (Profile, []FallbackMetadata, error) {
+	profile := Profile{
+		IMSI: strings.TrimSpace(p.IMSI),
+		MCC:  strings.TrimSpace(p.MCC),
+		MNC:  strings.TrimSpace(p.MNC),
+		IMEI: strings.TrimSpace(p.IMEI),
+		SMSC: strings.TrimSpace(p.SMSC),
+	}
+	if profile.IMSI == "" {
+		return Profile{}, nil, errors.New("IMSI is empty")
+	}
+	if normalized := normalizeIMSI(profile.IMSI); normalized != "" {
+		profile.IMSI = normalized
+	} else {
+		return Profile{}, nil, fmt.Errorf("invalid IMSI %q: must be 5-15 decimal digits", profile.IMSI)
+	}
+
+	imsiMCC, imsiMNC := plmnFromIMSI(profile.IMSI)
+	var fallbacks []FallbackMetadata
+	if mcc := normalizeMCC(profile.MCC); mcc != "" {
+		profile.MCC = mcc
+	} else {
+		fallbacks = append(fallbacks, profilePLMNFallbackMetadata(IdentityFieldMCC, profile.MCC))
+		profile.MCC = imsiMCC
+	}
+	if mnc := normalizeMNC(profile.MNC); mnc != "" {
+		profile.MNC = mnc
+	} else {
+		fallbacks = append(fallbacks, profilePLMNFallbackMetadata(IdentityFieldMNC, profile.MNC))
+		profile.MNC = imsiMNC
+	}
+	return profile, fallbacks, nil
+}
+
+func profilePLMNFallbackMetadata(field, value string) FallbackMetadata {
+	value = strings.TrimSpace(value)
+	reason := fmt.Errorf("profile %s is empty; derived from IMSI", strings.ToUpper(field))
+	if value != "" {
+		reason = fmt.Errorf("profile %s %q is invalid; derived from IMSI", strings.ToUpper(field), value)
+	}
+	return NewReadFallbackMetadata(field, IMSISourceProfile, PLMNSourceIMSI, reason)
+}
+
+func normalizeIMSI(imsi string) string {
+	imsi = strings.TrimSpace(imsi)
+	if len(imsi) < 5 || len(imsi) > 15 || !isDecimalString(imsi) {
+		return ""
+	}
+	return imsi
+}
+
+func normalizeMCC(mcc string) string {
+	mcc = strings.TrimSpace(mcc)
+	if len(mcc) != 3 || !isDecimalString(mcc) {
+		return ""
+	}
+	return mcc
+}
+
+func normalizeMNC(mnc string) string {
+	mnc = strings.TrimSpace(mnc)
+	if !isDecimalString(mnc) {
+		return ""
+	}
+	if len(mnc) == 2 {
+		return "0" + mnc
+	}
+	if len(mnc) != 3 {
+		return ""
+	}
+	return mnc
+}
+
+func plmnFromIMSI(imsi string) (string, string) {
+	imsi = normalizeIMSI(imsi)
+	if imsi == "" {
+		return "", ""
+	}
+	mcc := normalizeMCC(imsi[:3])
+	mnc := ""
+	switch {
+	case len(imsi) >= 6:
+		mnc = normalizeMNC(imsi[3:6])
+	case len(imsi) >= 5:
+		mnc = normalizeMNC(imsi[3:5])
+	}
+	return mcc, mnc
+}
+
+func isDecimalString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func selectISIMIMPU(impus []string, domain string, profile Profile) string {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	var firstSIP, firstAny string
@@ -266,14 +371,14 @@ func profileIMPU(profile Profile) string {
 }
 
 func profileIMPUWithNetwork(profile Profile, network carrier.NetworkConfig) string {
-	imsi := strings.TrimSpace(profile.IMSI)
+	imsi := normalizeIMSI(profile.IMSI)
 	if imsi == "" {
 		return ""
 	}
 	if impu := carrier.DeriveIMSPublicIdentityForNetwork(imsi, network); impu != "" {
 		return impu
 	}
-	return "sip:" + imsi
+	return ""
 }
 
 func profileIMPI(profile Profile) string {
@@ -281,14 +386,14 @@ func profileIMPI(profile Profile) string {
 }
 
 func profileIMPIWithNetwork(profile Profile, network carrier.NetworkConfig) string {
-	imsi := strings.TrimSpace(profile.IMSI)
+	imsi := normalizeIMSI(profile.IMSI)
 	if imsi == "" {
 		return ""
 	}
 	if impi := carrier.DeriveIMSPrivateIdentityForNetwork(imsi, network); impi != "" {
 		return impi
 	}
-	return imsi
+	return ""
 }
 
 func profileDomain(profile Profile) string {

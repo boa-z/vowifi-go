@@ -216,6 +216,55 @@ func ParseSDPCryptoAttributeKeys(attr SDPCryptoAttribute) (SRTPProtectionProfile
 	return profile, params, nil
 }
 
+func SelectSDPCryptoAttribute(crypto []SDPCryptoAttribute, preferred []SRTPProtectionProfile) (SDPCryptoAttribute, SRTPProtectionProfile, SDPCryptoInlineKeyParams, bool, error) {
+	if len(crypto) == 0 {
+		return SDPCryptoAttribute{}, "", SDPCryptoInlineKeyParams{}, false, nil
+	}
+	var firstErr error
+	if len(preferred) == 0 {
+		for _, attr := range crypto {
+			profile, params, err := ParseSDPCryptoAttributeKeys(attr)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			return trimSDPCryptoAttribute(attr), profile, params, true, nil
+		}
+		if firstErr != nil {
+			return SDPCryptoAttribute{}, "", SDPCryptoInlineKeyParams{}, false, firstErr
+		}
+		return SDPCryptoAttribute{}, "", SDPCryptoInlineKeyParams{}, false, nil
+	}
+	for _, want := range preferred {
+		wantSuite := want.SDPCryptoSuite()
+		if wantSuite == "" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%w: unsupported SDP crypto suite %q", ErrSRTPMediaConfig, want)
+			}
+			continue
+		}
+		for _, attr := range crypto {
+			if !strings.EqualFold(strings.TrimSpace(attr.Suite), wantSuite) {
+				continue
+			}
+			profile, params, err := ParseSDPCryptoAttributeKeys(attr)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			return trimSDPCryptoAttribute(attr), profile, params, true, nil
+		}
+	}
+	if firstErr != nil {
+		return SDPCryptoAttribute{}, "", SDPCryptoInlineKeyParams{}, false, firstErr
+	}
+	return SDPCryptoAttribute{}, "", SDPCryptoInlineKeyParams{}, false, nil
+}
+
 func BuildSDPCryptoAttribute(tag string, profile SRTPProtectionProfile, params SDPCryptoInlineKeyParams, sessionParams string) (SDPCryptoAttribute, error) {
 	tag = strings.TrimSpace(tag)
 	if err := validateSDPCryptoTag(tag); err != nil {
@@ -235,6 +284,15 @@ func BuildSDPCryptoAttribute(tag string, profile SRTPProtectionProfile, params S
 		KeyParams:     keyParams,
 		SessionParams: strings.TrimSpace(sessionParams),
 	}, nil
+}
+
+func trimSDPCryptoAttribute(attr SDPCryptoAttribute) SDPCryptoAttribute {
+	return SDPCryptoAttribute{
+		Tag:           strings.TrimSpace(attr.Tag),
+		Suite:         strings.TrimSpace(attr.Suite),
+		KeyParams:     strings.TrimSpace(attr.KeyParams),
+		SessionParams: strings.TrimSpace(attr.SessionParams),
+	}
 }
 
 func NewSRTPMediaSession(cfg SRTPMediaConfig) (*SRTPMediaSession, error) {

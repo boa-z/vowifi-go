@@ -179,6 +179,117 @@ func TestNotificationAndClientErrorAttributes(t *testing.T) {
 	}
 }
 
+func TestTypedControlAttributeExtraction(t *testing.T) {
+	packets := [][]byte{
+		{CodeRequest, 1, 0, 8, TypeAKA, SubtypeIdentity, 0, 0},
+		{CodeResponse, 1, 0, 8, TypeAKA, SubtypeIdentity, 0, 0},
+	}
+	attrs := []Attribute{
+		NotificationAttribute(NotificationSuccess | 0x0025),
+		ClientErrorCodeAttribute(ClientErrorRANDNotFresh),
+		CounterTooSmallAttribute(),
+		CheckcodeAttributeForPackets(packets),
+		ResultIndAttribute(),
+	}
+
+	notification, ok, err := NotificationFromAttributes(attrs)
+	if err != nil {
+		t.Fatalf("NotificationFromAttributes() error = %v", err)
+	}
+	if !ok || notification.Value != NotificationSuccess|0x0025 || notification.Code != 0x0025 || !notification.Success || notification.BeforeAuthentication {
+		t.Fatalf("notification ok=%t info=%+v", ok, notification)
+	}
+	clientError, ok, err := ClientErrorCodeFromAttributes(attrs)
+	if err != nil {
+		t.Fatalf("ClientErrorCodeFromAttributes() error = %v", err)
+	}
+	if !ok || clientError != ClientErrorRANDNotFresh {
+		t.Fatalf("client error ok=%t code=%d", ok, clientError)
+	}
+	counterTooSmall, err := CounterTooSmallFromAttributes(attrs)
+	if err != nil {
+		t.Fatalf("CounterTooSmallFromAttributes() error = %v", err)
+	}
+	if !counterTooSmall {
+		t.Fatal("CounterTooSmallFromAttributes() = false, want true")
+	}
+	checkcode, ok, err := CheckcodeFromAttributes(attrs)
+	if err != nil {
+		t.Fatalf("CheckcodeFromAttributes() error = %v", err)
+	}
+	if !ok || len(checkcode) != 20 {
+		t.Fatalf("checkcode ok=%t value=%x", ok, checkcode)
+	}
+	checkcode[0] ^= 0xff
+	again, ok, err := CheckcodeFromAttributes(attrs)
+	if err != nil {
+		t.Fatalf("CheckcodeFromAttributes(again) error = %v", err)
+	}
+	if !ok || again[0] == checkcode[0] {
+		t.Fatalf("checkcode was not cloned: first=%x again=%x", checkcode, again)
+	}
+	resultInd, err := ResultIndFromAttributes(attrs)
+	if err != nil {
+		t.Fatalf("ResultIndFromAttributes() error = %v", err)
+	}
+	if !resultInd {
+		t.Fatal("ResultIndFromAttributes() = false, want true")
+	}
+}
+
+func TestTypedControlPacketParsing(t *testing.T) {
+	notification, err := ParseNotificationRequest(Packet{
+		Code:       CodeRequest,
+		Identifier: 3,
+		Type:       TypeAKAPrime,
+		Subtype:    SubtypeNotification,
+		Attributes: []Attribute{NotificationAttribute(NotificationGeneralFailureBeforeAuthentication)},
+	})
+	if err != nil {
+		t.Fatalf("ParseNotificationRequest() error = %v", err)
+	}
+	if notification.Value != NotificationGeneralFailureBeforeAuthentication || !notification.BeforeAuthentication || notification.Success {
+		t.Fatalf("notification=%+v", notification)
+	}
+
+	clientError, err := ParseClientErrorResponse(Packet{
+		Code:       CodeResponse,
+		Identifier: 4,
+		Type:       TypeAKA,
+		Subtype:    SubtypeClientError,
+		Attributes: []Attribute{ClientErrorCodeAttribute(ClientErrorInsufficientChallenges)},
+	})
+	if err != nil {
+		t.Fatalf("ParseClientErrorResponse() error = %v", err)
+	}
+	if clientError != ClientErrorInsufficientChallenges {
+		t.Fatalf("client error=%d", clientError)
+	}
+}
+
+func TestTypedControlExtractionRejectsInvalidAttributes(t *testing.T) {
+	if _, _, err := NotificationFromAttributes([]Attribute{
+		NotificationAttribute(NotificationSuccess),
+		NotificationAttribute(NotificationGeneralFailureBeforeAuthentication),
+	}); !errors.Is(err, ErrInvalidAttribute) {
+		t.Fatalf("NotificationFromAttributes(duplicate) err=%v, want ErrInvalidAttribute", err)
+	}
+	if _, err := ResultIndFromAttributes([]Attribute{{Type: AttributeResultInd, Data: []byte{0, 1}}}); !errors.Is(err, ErrInvalidAttribute) {
+		t.Fatalf("ResultIndFromAttributes(invalid) err=%v, want ErrInvalidAttribute", err)
+	}
+	if _, err := CounterTooSmallFromAttributes([]Attribute{{Type: AttributeCounterTooSmall, Data: []byte{1, 0}}}); !errors.Is(err, ErrInvalidAttribute) {
+		t.Fatalf("CounterTooSmallFromAttributes(invalid) err=%v, want ErrInvalidAttribute", err)
+	}
+	if _, err := ParseClientErrorResponse(Packet{
+		Code:       CodeResponse,
+		Type:       99,
+		Subtype:    SubtypeClientError,
+		Attributes: []Attribute{ClientErrorCodeAttribute(ClientErrorUnableToProcessPacket)},
+	}); !errors.Is(err, ErrInvalidPacket) {
+		t.Fatalf("ParseClientErrorResponse(bad type) err=%v, want ErrInvalidPacket", err)
+	}
+}
+
 func TestVersionAttributes(t *testing.T) {
 	raw, err := MarshalAttributes([]Attribute{
 		VersionListAttribute(2, SupportedVersion),

@@ -43,8 +43,9 @@ protocol layers needed by VoHive:
   recovery error classification with opt-in non-destructive retry hooks,
   human-readable APDU/CRSM status-word descriptions for common SIM/USIM/ISIM
   success, warning, procedure, and checking-error responses,
-  reusable ISIM identity, USIM EF_IMSI, and EF_AD MNC-length decoders, ISIM
-  EF identity string TLV encoding and linear-fixed record padding helpers, and
+  reusable ISIM identity, USIM EF_IMSI decoding/encoding, and EF_AD MNC-length
+  decoders, ISIM EF identity string TLV encoding and linear-fixed record
+  padding helpers, short-APDU UPDATE BINARY/UPDATE RECORD EF write helpers, and
   USIM/ISIM AKA AUTHENTICATE primitives
 - carrier presets and JSON carrier overrides, including AT&T TS.43/E911
   configuration for native `310/280` and `310/410` profiles, plus normalized
@@ -64,7 +65,8 @@ protocol layers needed by VoHive:
   entitlement challenges and HTTP `WWW-Authenticate`/`Proxy-Authenticate`
   challenge parsing/classification without leaking nonce material in errors,
   including HTTP Digest AKAv1-MD5/AKAv2-MD5 entitlement retry generation with
-  AUTS synchronization-failure retry handling
+  mixed-case challenge normalization, proxy digest handling, `Authentication-Info`
+  nextnonce parsing helpers, and AUTS synchronization-failure retry handling
 - IMS SIP client primitives for REGISTER headers, `WWW-Authenticate` parsing,
   AKA nonce extraction, Digest MD5/MD5-sess/SHA-256/SHA-512-256 plus
   AKAv1-MD5 and AKAv2-MD5 authorization material,
@@ -72,7 +74,8 @@ protocol layers needed by VoHive:
   `Security-Server` parsing/selection against the offered client algorithms,
   direction-aware IMS IPsec SA plan extraction, Security-Verify
   echoing, Linux XFRM install planning for SHA1/MD5 96-bit HMAC IMS ESP
-  transport SAs with null or AES-CBC ESP encryption, folded/compact SIP header parsing, strict
+  transport SAs with null or AES-CBC ESP encryption and selected-parameter
+  fallbacks for protocol, mode, SPI, ports, and algorithms, folded/compact SIP header parsing, strict
   Content-Length body and duplicate-length validation, SIP response status-code
   range validation, deterministic wire ordering for REFER/supplementary-service
   headers, wire-level UDP/TCP REGISTER transport, and IMS registration binding
@@ -157,6 +160,8 @@ protocol layers needed by VoHive:
   IMS BYE/CANCEL response status/body/header capture and local softphone
   response propagation,
   RTP/RTCP media relay endpoint allocation, SDP media/RTCP rewriting,
+  SDP `rtcp-fb`, `rtcp-mux`, `rtcp-rsize`, multi-crypto, fingerprint, and
+  unknown audio attribute preservation helpers,
   audio-scoped SDP direction parsing/rewrite and answer-direction negotiation,
   packet forwarding, and dialog termination hooks
 - SWu tunnel manager/session contracts with startup validation, tunnel readiness
@@ -166,7 +171,9 @@ protocol layers needed by VoHive:
   primitives for the SWu dataplane
 - IKEv2 SA proposal/transform encoding, default IKE/ESP proposals,
   configuration payload requests, identity payloads, traffic selectors, and
-  EAP-AKA/AKA' packet and attribute codecs, including selected-SA validation
+  EAP-AKA/AKA' packet and attribute codecs, including notification,
+  client-error, counter-too-small, checkcode, result-indication, and
+  reauthentication-state helpers, selected-SA validation
   plus key material/profile derivation for combined-mode AES-GCM proposals
   without separate INTEG transforms
 - IKE_SA_INIT initiator flow with UDP/NAT-T transport support, X25519 key

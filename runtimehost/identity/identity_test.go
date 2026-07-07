@@ -143,6 +143,43 @@ func TestPrepareStartDerivesProfileIMSIdentityWith3GPPRealm(t *testing.T) {
 	if prepared.EPDGAddr != "epdg.epc.mnc010.mcc001.pub.3gppnetwork.org" {
 		t.Fatalf("EPDGAddr=%q", prepared.EPDGAddr)
 	}
+	for _, field := range []string{IdentityFieldMCC, IdentityFieldMNC} {
+		meta, ok := fallbackByField(prepared.Fallbacks, field)
+		if !ok || meta.PrimarySource != IMSISourceProfile || meta.FallbackSource != PLMNSourceIMSI || !meta.Used {
+			t.Fatalf("%s fallback metadata=%+v ok=%t, want profile-to-IMSI fallback", field, meta, ok)
+		}
+	}
+}
+
+func TestPrepareStartNormalizesInvalidProfilePLMNFromIMSI(t *testing.T) {
+	prepared, err := PrepareStart(PrepareStartInput{
+		Profile: Profile{
+			IMSI: "001010123456789",
+			MCC:  "31x",
+			MNC:  "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PrepareStart() error = %v", err)
+	}
+	if prepared.Profile.MCC != "001" || prepared.Profile.MNC != "010" {
+		t.Fatalf("profile PLMN=(%q,%q), want IMSI-derived 001/010", prepared.Profile.MCC, prepared.Profile.MNC)
+	}
+	for _, field := range []string{IdentityFieldMCC, IdentityFieldMNC} {
+		meta, ok := fallbackByField(prepared.Fallbacks, field)
+		if !ok || meta.FallbackSource != PLMNSourceIMSI || !strings.Contains(meta.Reason, "invalid") {
+			t.Fatalf("%s fallback metadata=%+v ok=%t, want invalid profile PLMN fallback", field, meta, ok)
+		}
+	}
+}
+
+func TestPrepareStartRejectsInvalidIMSI(t *testing.T) {
+	_, err := PrepareStart(PrepareStartInput{
+		Profile: Profile{IMSI: "00101x123456789", MCC: "001", MNC: "010"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid IMSI") {
+		t.Fatalf("PrepareStart() err=%v, want invalid IMSI error", err)
+	}
 }
 
 func TestPrepareStartUsesCarrierPrivateIdentityRealmOverride(t *testing.T) {
@@ -249,10 +286,10 @@ func TestPrepareStartRecordsDeviceIDIMEIFallback(t *testing.T) {
 	if prepared.IdentityIMSISource != IMSISourceProfile || prepared.IdentityIMEISource != IMEISourceDeviceID {
 		t.Fatalf("sources IMSI=%q IMEI=%q, want profile/device_id", prepared.IdentityIMSISource, prepared.IdentityIMEISource)
 	}
-	if len(prepared.Fallbacks) != 1 {
+	meta, ok := fallbackByField(prepared.Fallbacks, IdentityFieldIMEI)
+	if !ok {
 		t.Fatalf("Fallbacks=%#v, want IMEI fallback metadata", prepared.Fallbacks)
 	}
-	meta := prepared.Fallbacks[0]
 	if meta.Field != IdentityFieldIMEI || meta.PrimarySource != IMEISourceProfile ||
 		meta.FallbackSource != IMEISourceDeviceID || !meta.Used || meta.RecoveryClass != simtransport.RecoveryClassNone {
 		t.Fatalf("IMEI fallback metadata=%+v", meta)
@@ -273,10 +310,10 @@ func TestPrepareStartClassifiesISIMReadFallback(t *testing.T) {
 		prepared.IMSIdentity.RecoveryClass != simtransport.RecoveryClassControlPortHung {
 		t.Fatalf("IMS fallback resolution=%+v", prepared.IMSIdentity)
 	}
-	if len(prepared.Fallbacks) != 1 {
+	meta, ok := fallbackByField(prepared.Fallbacks, IdentityFieldIMSIdentity)
+	if !ok {
 		t.Fatalf("Fallbacks=%#v, want ISIM fallback metadata", prepared.Fallbacks)
 	}
-	meta := prepared.Fallbacks[0]
 	if meta.Field != IdentityFieldIMSIdentity || meta.PrimarySource != IMSIdentitySourceISIM ||
 		meta.FallbackSource != IMSIdentitySourceProfile || !meta.Used || !meta.Recoverable ||
 		meta.RecoveryClass != simtransport.RecoveryClassControlPortHung {
@@ -301,6 +338,15 @@ func TestExtractIMEIIgnoresNonIMEIDeviceID(t *testing.T) {
 	if got := ExtractIMEI("prefix-490154203237518-suffix"); got != "490154203237518" {
 		t.Fatalf("ExtractIMEI() = %q, want IMEI", got)
 	}
+}
+
+func fallbackByField(fallbacks []FallbackMetadata, field string) (FallbackMetadata, bool) {
+	for _, meta := range fallbacks {
+		if meta.Field == field {
+			return meta, true
+		}
+	}
+	return FallbackMetadata{}, false
 }
 
 type partialAccess struct {

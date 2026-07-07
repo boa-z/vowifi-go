@@ -59,6 +59,7 @@ func buildEntitlementHTTPDigestAuthorization(httpReq *HTTPRequest, req Request, 
 	if err != nil {
 		return entitlementHTTPDigestAuthorization{}, false, false, fmt.Errorf("%w: %v", ErrChallengeNotImplemented, err)
 	}
+	challenge = entitlementHTTPDigestNormalizeChallenge(challenge)
 	input, syncFailure, err := entitlementHTTPDigestInput(httpReq, req, challenge)
 	if err != nil {
 		return entitlementHTTPDigestAuthorization{}, false, false, err
@@ -129,13 +130,147 @@ func entitlementHTTPDigestChallengeHeaders(challenges []HTTPAuthenticationChalle
 	var values []string
 	for _, challenge := range challenges {
 		if strings.EqualFold(challenge.Header, headerName) && strings.TrimSpace(challenge.Raw) != "" {
-			values = append(values, challenge.Raw)
+			values = append(values, entitlementHTTPDigestChallengeValue(challenge))
 		}
 	}
 	if len(values) == 0 {
 		return nil
 	}
 	return map[string][]string{headerName: values}
+}
+
+func entitlementHTTPDigestChallengeValue(challenge HTTPAuthenticationChallenge) string {
+	if !strings.EqualFold(strings.TrimSpace(challenge.Scheme), "Digest") {
+		return challenge.Raw
+	}
+	if len(challenge.Params) == 0 {
+		return challenge.Raw
+	}
+	realm := strings.TrimSpace(challenge.Params["realm"])
+	nonce := strings.TrimSpace(challenge.Params["nonce"])
+	if realm == "" || nonce == "" {
+		return challenge.Raw
+	}
+	algorithm := entitlementHTTPDigestCanonicalAlgorithm(challenge.Params["algorithm"])
+	qop := entitlementHTTPDigestCanonicalQOP(challenge.Params["qop"])
+	parts := []string{
+		`Digest realm="` + quoteHTTPAuthValue(realm) + `"`,
+		`nonce="` + quoteHTTPAuthValue(nonce) + `"`,
+	}
+	if algorithm != "" {
+		parts = append(parts, `algorithm=`+algorithm)
+	}
+	if qop != "" {
+		parts = append(parts, `qop="`+quoteHTTPAuthValue(qop)+`"`)
+	}
+	if opaque := challenge.Params["opaque"]; opaque != "" {
+		parts = append(parts, `opaque="`+quoteHTTPAuthValue(opaque)+`"`)
+	}
+	if stale := entitlementHTTPDigestCanonicalStale(challenge.Params["stale"]); stale != "" {
+		parts = append(parts, `stale=`+stale)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func entitlementHTTPDigestNormalizeChallenge(challenge voiceclient.DigestChallenge) voiceclient.DigestChallenge {
+	if strings.EqualFold(strings.TrimSpace(challenge.Scheme), "Digest") || strings.TrimSpace(challenge.Scheme) == "" {
+		challenge.Scheme = "Digest"
+	}
+	if algorithm := entitlementHTTPDigestCanonicalAlgorithm(challenge.Algorithm); algorithm != "" {
+		challenge.Algorithm = algorithm
+	}
+	challenge.QOP = entitlementHTTPDigestCanonicalQOP(challenge.QOP)
+	return challenge
+}
+
+func entitlementHTTPDigestCanonicalAlgorithm(algorithm string) string {
+	switch strings.ToUpper(strings.TrimSpace(algorithm)) {
+	case "":
+		return ""
+	case "AKAV1-MD5":
+		return "AKAv1-MD5"
+	case "AKAV2-MD5":
+		return "AKAv2-MD5"
+	case "MD5":
+		return "MD5"
+	case "MD5-SESS":
+		return "MD5-sess"
+	case "SHA-256":
+		return "SHA-256"
+	case "SHA-256-SESS":
+		return "SHA-256-sess"
+	case "SHA-512-256":
+		return "SHA-512-256"
+	case "SHA-512-256-SESS":
+		return "SHA-512-256-sess"
+	default:
+		return strings.TrimSpace(algorithm)
+	}
+}
+
+func entitlementHTTPDigestCanonicalQOP(qop string) string {
+	for _, part := range strings.Split(qop, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "auth") {
+			return "auth"
+		}
+	}
+	for _, part := range strings.Split(qop, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "auth-int") {
+			return "auth-int"
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(qop))
+}
+
+func entitlementHTTPDigestCanonicalStale(stale string) string {
+	stale = strings.TrimSpace(stale)
+	if stale == "" {
+		return ""
+	}
+	if strings.EqualFold(stale, "true") {
+		return "true"
+	}
+	if strings.EqualFold(stale, "false") {
+		return "false"
+	}
+	return strings.ToLower(stale)
+}
+
+func entitlementHTTPDigestAuthenticationInfoParams(headers []HeaderPair, authHeaderName string) map[string]string {
+	for _, name := range entitlementHTTPDigestAuthenticationInfoHeaderNames(authHeaderName) {
+		params := make(map[string]string)
+		for _, header := range headers {
+			if !strings.EqualFold(header.Key, name) {
+				continue
+			}
+			for _, part := range splitHTTPAuthParams(header.Value) {
+				key, value, ok := strings.Cut(part, "=")
+				if !ok {
+					continue
+				}
+				key = strings.ToLower(strings.TrimSpace(key))
+				if key == "" {
+					continue
+				}
+				setHTTPAuthParam(params, key, unquoteHTTPAuthValue(value))
+			}
+		}
+		if len(params) > 0 {
+			return params
+		}
+	}
+	return nil
+}
+
+func entitlementHTTPDigestNextNonce(headers []HeaderPair, authHeaderName string) string {
+	return entitlementHTTPDigestAuthenticationInfoParams(headers, authHeaderName)["nextnonce"]
+}
+
+func entitlementHTTPDigestAuthenticationInfoHeaderNames(authHeaderName string) []string {
+	if strings.EqualFold(strings.TrimSpace(authHeaderName), "Proxy-Authorization") {
+		return []string{"Proxy-Authentication-Info", "Authentication-Info"}
+	}
+	return []string{"Authentication-Info", "Proxy-Authentication-Info"}
 }
 
 func entitlementHTTPDigestUsername(identity Identity) string {
