@@ -43,6 +43,8 @@ replace github.com/boa-z/vowifi-go v1.1.2 => ../vowifi-go
 
 - [Features](docs/FEATURES.md) - current implementation inventory and known
   gaps.
+- [VoHive readiness](docs/VOHIVE_READINESS.md) - remaining work before this
+  module should be treated as usable inside VoHive.
 - [Architecture](docs/ARCHITECTURE.md) - package layout, runtime boundaries,
   and high-level flow.
 - [Development](docs/DEVELOPMENT.md) - CI targets, local validation, and

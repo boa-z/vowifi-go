@@ -408,6 +408,9 @@ protocol layers needed by VoHive:
 
 - Complete parity with the official closed-source implementation is not
   available.
+- VoHive compile compatibility is not the same as VoHive runtime readiness; see
+  [VoHive readiness](VOHIVE_READINESS.md) for the full gap analysis and
+  acceptance checklist.
 - Full SIP transaction timer state machines are still being expanded.
 - Advanced IMS feature interworking and carrier-specific behavior are still
   implemented incrementally.
