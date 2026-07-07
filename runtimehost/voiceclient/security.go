@@ -22,6 +22,8 @@ const (
 
 	defaultSecurityIPSecProtocol = "esp"
 	defaultSecurityMode          = "trans"
+
+	securityAgreementCompleteIPSecSABonus = 2000
 )
 
 type SecurityAgreement struct {
@@ -521,10 +523,24 @@ func securityAgreementScore(offer, client SecurityAgreement) int {
 	if offer.PortClient > 0 && offer.PortServer > 0 {
 		score += 4
 	}
+	if securityAgreementHasCompleteIPSecSA(offer) {
+		score += securityAgreementCompleteIPSecSABonus
+	}
 	if q, ok := offer.Parameters["q"]; ok {
 		score += securityQValue(q)
 	}
 	return score
+}
+
+func securityAgreementHasCompleteIPSecSA(agreement SecurityAgreement) bool {
+	agreement = completeSecurityAgreement(agreement)
+	return strings.EqualFold(agreement.Protocol, DefaultSecurityProtocol) &&
+		agreement.SPIClient > 0 &&
+		agreement.SPIServer > 0 &&
+		agreement.PortClient > 0 &&
+		agreement.PortClient <= 65535 &&
+		agreement.PortServer > 0 &&
+		agreement.PortServer <= 65535
 }
 
 func securityAgreementCompatible(offer, client SecurityAgreement) bool {
