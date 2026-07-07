@@ -21,10 +21,13 @@ type NetworkConfig struct {
 	IMSRealm             string   `json:"ims_realm"`
 	PrivateIdentityRealm string   `json:"private_identity_realm"`
 	NAIRealm             string   `json:"nai_realm"`
+	IMSAPN               string   `json:"ims_apn,omitempty"`
+	EmergencyAPN         string   `json:"emergency_apn,omitempty"`
 	PCSCFFQDN            string   `json:"pcscf_fqdn"`
 	PCSCFFQDNs           []string `json:"pcscf_fqdns,omitempty"`
 	EPDGFQDN             string   `json:"epdg_fqdn"`
 	EmergencyDomain      string   `json:"emergency_domain"`
+	EmergencyServiceURNs []string `json:"emergency_service_urns,omitempty"`
 	AccessNetworkInfo    string   `json:"access_network_info,omitempty"`
 	VisitedNetworkID     string   `json:"visited_network_id,omitempty"`
 }
@@ -36,6 +39,10 @@ type networkConfigJSON struct {
 	PrivateIdentityDomain string          `json:"private_identity_domain"`
 	NAIRealm              string          `json:"nai_realm"`
 	NAIDomain             string          `json:"nai_domain"`
+	IMSAPN                string          `json:"ims_apn"`
+	APN                   string          `json:"apn"`
+	EmergencyAPN          string          `json:"emergency_apn"`
+	SOSAPN                string          `json:"sos_apn"`
 	PCSCFFQDN             string          `json:"pcscf_fqdn"`
 	PCSCFFQDNs            json.RawMessage `json:"pcscf_fqdns"`
 	PCSCFFQDNList         json.RawMessage `json:"pcscf_fqdn_list"`
@@ -45,6 +52,8 @@ type networkConfigJSON struct {
 	EPDG                  string          `json:"epdg"`
 	EmergencyDomain       string          `json:"emergency_domain"`
 	EmergencyRealm        string          `json:"emergency_realm"`
+	EmergencyServiceURNs  json.RawMessage `json:"emergency_service_urns"`
+	ServiceURNs           json.RawMessage `json:"service_urns"`
 	AccessNetworkInfo     string          `json:"access_network_info"`
 	PAccessNetworkInfo    string          `json:"p_access_network_info"`
 	PANI                  string          `json:"pani"`
@@ -70,14 +79,25 @@ func (raw networkConfigJSON) networkConfig() (NetworkConfig, error) {
 	if err != nil {
 		return NetworkConfig{}, err
 	}
+	emergencyServiceURNs, err := stringsFromNetworkJSON(raw.EmergencyServiceURNs, true)
+	if err != nil {
+		return NetworkConfig{}, err
+	}
+	serviceURNs, err := stringsFromNetworkJSON(raw.ServiceURNs, true)
+	if err != nil {
+		return NetworkConfig{}, err
+	}
 	return NetworkConfig{
 		IMSRealm:             firstNetworkString(raw.IMSRealm, raw.IMSDomain),
 		PrivateIdentityRealm: firstNetworkString(raw.PrivateIdentityRealm, raw.PrivateIdentityDomain),
 		NAIRealm:             firstNetworkString(raw.NAIRealm, raw.NAIDomain),
+		IMSAPN:               firstNetworkString(raw.IMSAPN, raw.APN),
+		EmergencyAPN:         firstNetworkString(raw.EmergencyAPN, raw.SOSAPN),
 		PCSCFFQDN:            raw.PCSCFFQDN,
 		PCSCFFQDNs:           append(append(append(pcscf, pcscfList...), pcscfLegacyList...), pcscfAlias...),
 		EPDGFQDN:             firstNetworkString(raw.EPDGFQDN, raw.EPDG),
 		EmergencyDomain:      firstNetworkString(raw.EmergencyDomain, raw.EmergencyRealm),
+		EmergencyServiceURNs: append(emergencyServiceURNs, serviceURNs...),
 		AccessNetworkInfo:    firstNetworkString(raw.AccessNetworkInfo, raw.PAccessNetworkInfo, raw.PANI),
 		VisitedNetworkID:     firstNetworkString(raw.VisitedNetworkID, raw.PVisitedNetworkID, raw.VisitedNetwork),
 	}, nil
@@ -111,6 +131,33 @@ type SubscriberProfile struct {
 	IMSPrivateIdentity string
 	IMSPublicIdentity  string
 	PermanentNAI       string
+}
+
+type IMSAccessProfileInput struct {
+	IMSI string
+	MCC  string
+	MNC  string
+}
+
+type IMSAccessProfile struct {
+	IMSI                 string
+	MCC                  string
+	MNC                  string
+	PresetID             string
+	IMSAPN               string
+	EmergencyAPN         string
+	IMSRealm             string
+	PrivateIdentityRealm string
+	NAIRealm             string
+	PCSCFFQDNs           []string
+	EPDGFQDN             string
+	EmergencyDomain      string
+	EmergencyServiceURNs []string
+	IMSPrivateIdentity   string
+	IMSPublicIdentity    string
+	PermanentNAI         string
+	AccessNetworkInfo    string
+	VisitedNetworkID     string
 }
 
 type EffectiveCarrierConfig struct {
@@ -304,6 +351,40 @@ func NormalizeSubscriberProfile(in SubscriberProfileInput) SubscriberProfile {
 	}
 }
 
+func IMSAccessProfileForSubscriber(in IMSAccessProfileInput) IMSAccessProfile {
+	cfg := ResolveEffectiveCarrierConfig(EffectiveCarrierConfigInput{
+		IMSI: in.IMSI,
+		MCC:  in.MCC,
+		MNC:  in.MNC,
+	})
+	profile := NormalizeSubscriberProfile(SubscriberProfileInput{
+		IMSI: in.IMSI,
+		MCC:  cfg.MCC,
+		MNC:  cfg.MNC,
+	})
+	network := cfg.Network
+	return IMSAccessProfile{
+		IMSI:                 profile.IMSI,
+		MCC:                  cfg.MCC,
+		MNC:                  cfg.MNC,
+		PresetID:             cfg.PresetID,
+		IMSAPN:               network.IMSAPN,
+		EmergencyAPN:         network.EmergencyAPN,
+		IMSRealm:             network.IMSRealm,
+		PrivateIdentityRealm: network.PrivateIdentityRealm,
+		NAIRealm:             network.NAIRealm,
+		PCSCFFQDNs:           PCSCFCandidates(network),
+		EPDGFQDN:             network.EPDGFQDN,
+		EmergencyDomain:      network.EmergencyDomain,
+		EmergencyServiceURNs: append([]string(nil), network.EmergencyServiceURNs...),
+		IMSPrivateIdentity:   DeriveIMSPrivateIdentityForNetwork(profile.IMSI, network),
+		IMSPublicIdentity:    DeriveIMSPublicIdentityForNetwork(profile.IMSI, network),
+		PermanentNAI:         DerivePermanentNAIForNetwork(profile.IMSI, network),
+		AccessNetworkInfo:    network.AccessNetworkInfo,
+		VisitedNetworkID:     network.VisitedNetworkID,
+	}
+}
+
 var blockedMCC = map[string]struct{}{
 	"460": {},
 }
@@ -389,6 +470,18 @@ func DefaultEmergencyDomain(mcc, mnc string) string {
 	return DefaultIMSRealm(mcc, mnc)
 }
 
+func DefaultIMSAPN() string {
+	return "ims"
+}
+
+func DefaultEmergencyAPN() string {
+	return "sos"
+}
+
+func DefaultEmergencyServiceURNs() []string {
+	return []string{"urn:service:sos"}
+}
+
 func DeriveIMSPrivateIdentity(imsi, mcc, mnc string) string {
 	return deriveIMSPrivateIdentityWithRealm(imsi, DefaultPrivateIdentityRealm(mcc, mnc))
 }
@@ -447,6 +540,8 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 	cfg.IMSRealm = normalizeDomainName(cfg.IMSRealm)
 	cfg.PrivateIdentityRealm = normalizeDomainName(cfg.PrivateIdentityRealm)
 	cfg.NAIRealm = normalizeDomainName(cfg.NAIRealm)
+	cfg.IMSAPN = normalizeAPN(cfg.IMSAPN)
+	cfg.EmergencyAPN = normalizeAPN(cfg.EmergencyAPN)
 	cfg.PCSCFFQDN = normalizeDomainName(cfg.PCSCFFQDN)
 	pcscfList := normalizeNetworkStringList(cfg.PCSCFFQDNs...)
 	cfg.PCSCFFQDNs = appendNetworkStrings(nil, cfg.PCSCFFQDN)
@@ -456,6 +551,7 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 	}
 	cfg.EPDGFQDN = normalizeDomainName(cfg.EPDGFQDN)
 	cfg.EmergencyDomain = normalizeDomainName(cfg.EmergencyDomain)
+	cfg.EmergencyServiceURNs = normalizeEmergencyServiceURNs(cfg.EmergencyServiceURNs...)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.VisitedNetworkID = strings.TrimSpace(cfg.VisitedNetworkID)
 	if mcc == "" || mnc == "" {
@@ -476,6 +572,12 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 	if cfg.NAIRealm == "" {
 		cfg.NAIRealm = DefaultNAIRealm(mcc, mnc)
 	}
+	if cfg.IMSAPN == "" {
+		cfg.IMSAPN = DefaultIMSAPN()
+	}
+	if cfg.EmergencyAPN == "" {
+		cfg.EmergencyAPN = DefaultEmergencyAPN()
+	}
 	if cfg.PCSCFFQDN == "" {
 		cfg.PCSCFFQDN = DefaultPCSCFFQDN(mcc, mnc)
 	}
@@ -485,6 +587,9 @@ func normalizeNetworkConfig(mcc, mnc string, cfg NetworkConfig) NetworkConfig {
 	}
 	if cfg.EmergencyDomain == "" {
 		cfg.EmergencyDomain = DefaultEmergencyDomain(mcc, mnc)
+	}
+	if len(cfg.EmergencyServiceURNs) == 0 {
+		cfg.EmergencyServiceURNs = DefaultEmergencyServiceURNs()
 	}
 	return cfg
 }
@@ -578,6 +683,12 @@ func mergeNetworkAliasConfig(base, alias NetworkConfig) NetworkConfig {
 	if strings.TrimSpace(base.NAIRealm) == "" {
 		base.NAIRealm = alias.NAIRealm
 	}
+	if strings.TrimSpace(base.IMSAPN) == "" {
+		base.IMSAPN = alias.IMSAPN
+	}
+	if strings.TrimSpace(base.EmergencyAPN) == "" {
+		base.EmergencyAPN = alias.EmergencyAPN
+	}
 	if strings.TrimSpace(base.PCSCFFQDN) == "" {
 		base.PCSCFFQDN = alias.PCSCFFQDN
 	}
@@ -588,6 +699,7 @@ func mergeNetworkAliasConfig(base, alias NetworkConfig) NetworkConfig {
 	if strings.TrimSpace(base.EmergencyDomain) == "" {
 		base.EmergencyDomain = alias.EmergencyDomain
 	}
+	base.EmergencyServiceURNs = append(base.EmergencyServiceURNs, alias.EmergencyServiceURNs...)
 	if strings.TrimSpace(base.AccessNetworkInfo) == "" {
 		base.AccessNetworkInfo = alias.AccessNetworkInfo
 	}
@@ -622,6 +734,50 @@ func normalizeMNC(mnc string) string {
 func normalizeDomainName(domain string) string {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	return strings.TrimSuffix(domain, ".")
+}
+
+func normalizeAPN(apn string) string {
+	return strings.ToLower(strings.TrimSpace(apn))
+}
+
+func normalizeEmergencyServiceURNs(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		urn := normalizeEmergencyServiceURN(value)
+		if urn == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range out {
+			if existing == urn {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, urn)
+		}
+	}
+	return out
+}
+
+func normalizeEmergencyServiceURN(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "service:")
+	switch value {
+	case "911", "112", "sos", "urn:service:sos":
+		return "urn:service:sos"
+	}
+	if strings.HasPrefix(value, "urn:service:sos") {
+		return value
+	}
+	if strings.Contains(value, ":") {
+		return ""
+	}
+	return "urn:service:sos." + strings.TrimPrefix(value, ".")
 }
 
 func presetKey(mcc, mnc string) string {

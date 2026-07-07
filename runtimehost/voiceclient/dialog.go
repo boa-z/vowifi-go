@@ -89,6 +89,7 @@ type ProvisionalResponseInfo struct {
 	SDP             []byte
 	RemoteTag       string
 	RemoteTargetURI string
+	DialogReasons   []DialogReason
 }
 
 type DialogSessionTimerInfo struct {
@@ -101,11 +102,20 @@ type DialogSessionTimerInfo struct {
 }
 
 type DialogFailureInfo struct {
-	StatusCode   int
-	ReasonPhrase string
-	RetryAfter   time.Duration
-	Warnings     []string
-	Reasons      []string
+	StatusCode    int
+	ReasonPhrase  string
+	RetryAfter    time.Duration
+	Warnings      []string
+	Reasons       []string
+	DialogReasons []DialogReason
+}
+
+type DialogReason struct {
+	Raw        string
+	Protocol   string
+	Cause      int
+	Text       string
+	Parameters map[string]string
 }
 
 func BuildInviteRequest(cfg DialogRequestConfig, sdp []byte) (SIPRequestMessage, error) {
@@ -251,6 +261,7 @@ func ParseProvisionalResponseInfo(resp SIPResponse) (ProvisionalResponseInfo, er
 		ContentType:     firstHeader(resp.Headers, "Content-Type"),
 		RemoteTag:       sipHeaderTag(firstHeader(resp.Headers, "To")),
 		RemoteTargetURI: firstContactURI(resp.Headers),
+		DialogReasons:   ParseDialogReasonHeaders(resp.Headers),
 	}
 	if isSIPProvisionalResponse(resp.StatusCode) && sipContentTypeMatches(info.ContentType, "application/sdp") && len(resp.Body) > 0 {
 		info.EarlyMedia = true
@@ -342,12 +353,14 @@ func DialogSessionTimerRetryConfig(cfg DialogRequestConfig, resp SIPResponse) (D
 }
 
 func ParseDialogFailureInfo(resp SIPResponse) DialogFailureInfo {
+	reasons := trimHeaderValues(headerListValues(resp.Headers, "Reason"))
 	return DialogFailureInfo{
-		StatusCode:   resp.StatusCode,
-		ReasonPhrase: strings.TrimSpace(resp.Reason),
-		RetryAfter:   SIPResponseRetryAfter(resp),
-		Warnings:     trimHeaderValues(headerListValues(resp.Headers, "Warning")),
-		Reasons:      trimHeaderValues(headerListValues(resp.Headers, "Reason")),
+		StatusCode:    resp.StatusCode,
+		ReasonPhrase:  strings.TrimSpace(resp.Reason),
+		RetryAfter:    SIPResponseRetryAfter(resp),
+		Warnings:      trimHeaderValues(headerListValues(resp.Headers, "Warning")),
+		Reasons:       reasons,
+		DialogReasons: parseDialogReasonValues(reasons),
 	}
 }
 
@@ -432,6 +445,97 @@ func FormatDialogReasonHeader(protocol string, cause int, text string) (string, 
 	}
 	if text != "" {
 		value += `;text="` + quote(text) + `"`
+	}
+	return value, nil
+}
+
+func ParseDialogReasonHeader(value string) (DialogReason, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return DialogReason{}, fmt.Errorf("%w: Reason header is empty", ErrInvalidSIPMessage)
+	}
+	parts := splitSIPHeaderParams(raw)
+	if len(parts) == 0 {
+		return DialogReason{}, fmt.Errorf("%w: invalid Reason header", ErrInvalidSIPMessage)
+	}
+	protocol := strings.TrimSpace(parts[0])
+	if protocol == "" || strings.ContainsAny(protocol, " \t\r\n;") {
+		return DialogReason{}, fmt.Errorf("%w: invalid Reason protocol", ErrInvalidSIPMessage)
+	}
+	reason := DialogReason{
+		Raw:        raw,
+		Protocol:   protocol,
+		Parameters: make(map[string]string),
+	}
+	for _, part := range parts[1:] {
+		key, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return DialogReason{}, fmt.Errorf("%w: invalid Reason parameter", ErrInvalidSIPMessage)
+		}
+		value := ""
+		if ok {
+			parsed, err := parseDialogReasonParamValue(rawValue)
+			if err != nil {
+				return DialogReason{}, err
+			}
+			value = parsed
+		}
+		reason.Parameters[key] = value
+		switch key {
+		case "cause":
+			cause, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil || cause <= 0 {
+				return DialogReason{}, fmt.Errorf("%w: invalid Reason cause", ErrInvalidSIPMessage)
+			}
+			reason.Cause = cause
+		case "text":
+			reason.Text = value
+		}
+	}
+	if reason.Cause <= 0 {
+		return DialogReason{}, fmt.Errorf("%w: Reason cause is missing", ErrInvalidSIPMessage)
+	}
+	return reason, nil
+}
+
+func ParseDialogReasonHeaders(headers map[string][]string) []DialogReason {
+	return parseDialogReasonValues(trimHeaderValues(headerListValues(headers, "Reason")))
+}
+
+func parseDialogReasonValues(values []string) []DialogReason {
+	out := make([]DialogReason, 0, len(values))
+	for _, value := range values {
+		reason, err := ParseDialogReasonHeader(value)
+		if err == nil {
+			out = append(out, reason)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseDialogReasonParamValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	quotedStart := strings.HasPrefix(value, `"`)
+	quotedEnd := strings.HasSuffix(value, `"`)
+	if quotedStart || quotedEnd {
+		if !quotedStart || !quotedEnd || len(value) < 2 {
+			return "", fmt.Errorf("%w: malformed Reason parameter", ErrInvalidSIPMessage)
+		}
+		out, err := strconv.Unquote(value)
+		if err != nil {
+			return "", fmt.Errorf("%w: malformed Reason parameter", ErrInvalidSIPMessage)
+		}
+		return out, nil
+	}
+	if strings.ContainsAny(value, "\"\r\n") {
+		return "", fmt.Errorf("%w: malformed Reason parameter", ErrInvalidSIPMessage)
 	}
 	return value, nil
 }

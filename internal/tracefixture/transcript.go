@@ -267,6 +267,7 @@ func (v *redactionValidator) scanString(path, value string) {
 	}
 	v.scanSensitiveHeaders(path, value)
 	v.scanAuthAndAKAParams(path, value)
+	v.scanSIPURIUserIdentifiers(path, value)
 	if labelledSubscriberIDRE.MatchString(value) || longDigitRE.MatchString(value) {
 		v.add(path, "subscriber identifier")
 	}
@@ -303,6 +304,17 @@ func (v *redactionValidator) scanAuthAndAKAParams(path, value string) {
 			continue
 		}
 		v.add(path, "auth material")
+	}
+}
+
+func (v *redactionValidator) scanSIPURIUserIdentifiers(path, value string) {
+	for _, match := range sipURIRE.FindAllStringSubmatch(value, -1) {
+		if len(match) != 3 {
+			continue
+		}
+		if kind, ok := sensitiveSIPURIUserKind(match[1]); ok {
+			v.add(path, kind)
+		}
 	}
 }
 
@@ -358,6 +370,38 @@ func (v *redactionValidator) err() error {
 	out := make([]RedactionViolation, len(v.violations))
 	copy(out, v.violations)
 	return &RedactionError{Violations: out}
+}
+
+func sensitiveSIPURIUserKind(user string) (string, bool) {
+	user = strings.TrimSpace(user)
+	user = strings.Trim(user, `"'<>`)
+	if user == "" || isRedactedLiteral(user) {
+		return "", false
+	}
+
+	digitCount := 0
+	phoneShaped := true
+	for i, r := range user {
+		switch {
+		case r >= '0' && r <= '9':
+			digitCount++
+		case r == '+' && i == 0:
+		case r == '.' || r == '-' || r == ' ' || r == '(' || r == ')':
+		default:
+			phoneShaped = false
+		}
+	}
+	if phoneShaped && digitCount >= 10 && digitCount <= 16 {
+		return "sip uri user identity", true
+	}
+
+	lower := strings.ToLower(user)
+	for _, marker := range []string{"imsi", "imei", "imeisv", "msisdn", "tel"} {
+		if strings.Contains(lower, marker) && digitCount >= 7 {
+			return "sip uri user identity", true
+		}
+	}
+	return "", false
 }
 
 func sensitiveHeaderKind(name string) (string, bool) {

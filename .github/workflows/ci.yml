@@ -27,18 +27,39 @@ env:
 
 jobs:
   go:
-    name: Go CI
+    name: Go CI (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: go.mod minimum
+            go-version-file: go.mod
+            go-version: ""
+          - name: latest 1.26 patch
+            go-version-file: ""
+            go-version: 1.26.x
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up pinned Go
+      - name: Set up Go from go.mod
+        if: ${{ matrix.go-version-file != '' }}
         uses: actions/setup-go@v5
         with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
+          go-version-file: ${{ matrix.go-version-file }}
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      - name: Set up Go version
+        if: ${{ matrix.go-version != '' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
           cache: true
           cache-dependency-path: |
             go.mod

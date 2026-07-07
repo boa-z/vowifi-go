@@ -467,6 +467,10 @@ type IMSRegistrationResult struct {
 	Server         string
 	Profile        voiceclient.IMSProfile
 	Binding        voiceclient.RegistrationBinding
+	RegisteredAt   time.Time
+	ExpiresAt      time.Time
+	RefreshDelay   time.Duration
+	NextRefreshAt  time.Time
 	RecoveryState  IMSRegistrationRecoveryState
 	VoiceTransport voiceclient.SIPRequestTransport
 	SMSTransport   messaging.SMSTransport

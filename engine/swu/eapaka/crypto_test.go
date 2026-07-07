@@ -697,6 +697,95 @@ func TestBuildReauthenticationResponse(t *testing.T) {
 	}
 }
 
+func TestBuildReauthenticationResponseWithCounterCheckAcceptsFreshCounter(t *testing.T) {
+	identity := "reauth-identity@example"
+	aka := sim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44},
+		CK:  bytes.Repeat([]byte{0xc1}, 16),
+		IK:  bytes.Repeat([]byte{0xd2}, 16),
+	}
+	keys, err := DeriveKeys(identity, aka)
+	if err != nil {
+		t.Fatalf("DeriveKeys() error = %v", err)
+	}
+	nonceS := []byte("0123456789abcdef")
+	request := signedReauthenticationRequest(t, keys, 12, nonceS, nil)
+	response, next, counterTooSmall, err := BuildReauthenticationResponseWithCounterCheck(identity, request, keys, bytes.Repeat([]byte{0x66}, 16), 11, true)
+	if err != nil {
+		t.Fatalf("BuildReauthenticationResponseWithCounterCheck() error = %v", err)
+	}
+	if counterTooSmall {
+		t.Fatal("counterTooSmall=true, want accepted reauthentication")
+	}
+	raw, err := response.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(response) error = %v", err)
+	}
+	if err := VerifyMAC(keys.KAut, raw, nonceS); err != nil {
+		t.Fatalf("VerifyMAC(response) error = %v", err)
+	}
+	attrs := decryptedReauthenticationResponseAttributes(t, keys, response)
+	if _, ok := FindAttribute(attrs, AttributeCounterTooSmall); ok {
+		t.Fatal("accepted reauth response included AT_COUNTER_TOO_SMALL")
+	}
+	derived, err := DeriveReauthenticationKeys(identity, keys, 12, nonceS)
+	if err != nil {
+		t.Fatalf("DeriveReauthenticationKeys() error = %v", err)
+	}
+	if !bytes.Equal(next.MSK, derived.MSK) || !bytes.Equal(next.EMSK, derived.EMSK) {
+		t.Fatal("returned keys do not match reauth derivation")
+	}
+}
+
+func TestBuildReauthenticationResponseWithCounterCheckRejectsStaleCounter(t *testing.T) {
+	identity := "reauth-identity@example"
+	aka := sim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44},
+		CK:  bytes.Repeat([]byte{0xc1}, 16),
+		IK:  bytes.Repeat([]byte{0xd2}, 16),
+	}
+	keys, err := DeriveKeys(identity, aka)
+	if err != nil {
+		t.Fatalf("DeriveKeys() error = %v", err)
+	}
+	nonceS := []byte("0123456789abcdef")
+	request := signedReauthenticationRequest(t, keys, 12, nonceS, nil)
+	response, next, counterTooSmall, err := BuildReauthenticationResponseWithCounterCheck("", request, keys, bytes.Repeat([]byte{0x88}, 16), 12, true)
+	if err != nil {
+		t.Fatalf("BuildReauthenticationResponseWithCounterCheck() error = %v", err)
+	}
+	if !counterTooSmall {
+		t.Fatal("counterTooSmall=false, want stale counter rejection")
+	}
+	if !bytes.Equal(next.KAut, keys.KAut) || !bytes.Equal(next.KEncr, keys.KEncr) || !bytes.Equal(next.MSK, keys.MSK) {
+		t.Fatal("counter-too-small response should keep existing keys")
+	}
+	raw, err := response.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(response) error = %v", err)
+	}
+	if err := VerifyMAC(keys.KAut, raw, nonceS); err != nil {
+		t.Fatalf("VerifyMAC(response) error = %v", err)
+	}
+	attrs := decryptedReauthenticationResponseAttributes(t, keys, response)
+	if tooSmall, ok := FindAttribute(attrs, AttributeCounterTooSmall); !ok {
+		t.Fatalf("missing encrypted AT_COUNTER_TOO_SMALL in attrs=%+v", attrs)
+	} else if err := tooSmall.CounterTooSmallValue(); err != nil {
+		t.Fatalf("CounterTooSmallValue() error = %v", err)
+	}
+	counterAttr, ok := FindAttribute(attrs, AttributeCounter)
+	if !ok {
+		t.Fatalf("missing encrypted AT_COUNTER in attrs=%+v", attrs)
+	}
+	counter, err := counterAttr.CounterValue()
+	if err != nil {
+		t.Fatalf("CounterValue() error = %v", err)
+	}
+	if counter != 12 {
+		t.Fatalf("encrypted counter=%d", counter)
+	}
+}
+
 func TestBuildAKAPrimeReauthenticationResponse(t *testing.T) {
 	fullIdentity := "0555444333222111"
 	reauthIdentity := "reauth-prime@example"

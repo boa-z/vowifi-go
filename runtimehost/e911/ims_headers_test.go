@@ -513,6 +513,121 @@ func TestBuildEmergencyPIDFLOUsageRules(t *testing.T) {
 	}
 }
 
+func TestValidateEmergencyPIDFLOExtractsEnvelopeAndUsageRules(t *testing.T) {
+	allowRetransmission := true
+	body, err := BuildEmergencyPIDFLOWithUsageRules(EmergencyPIDFLOConfig{
+		Entity:    "pres:device@example.test",
+		TupleID:   "loc-1",
+		Method:    "Derived",
+		Timestamp: time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC),
+		Address: EmergencyAddress{
+			Latitude:    "47.6205",
+			Longitude:   "-122.3493",
+			Country:     "US",
+			State:       "WA",
+			City:        "Seattle",
+			HouseNumber: "100",
+		},
+	}, EmergencyPIDFLOUsageRules{
+		RetransmissionAllowed: &allowRetransmission,
+		RetentionExpiry:       time.Date(2026, 7, 7, 9, 30, 0, 0, time.UTC),
+		RulesetReference:      "https://example.test/location-policy/e911",
+		NoteWell:              "Emergency location",
+	})
+	if err != nil {
+		t.Fatalf("BuildEmergencyPIDFLOWithUsageRules() error = %v", err)
+	}
+
+	validation, err := ValidateEmergencyPIDFLO(body)
+	if err != nil {
+		t.Fatalf("ValidateEmergencyPIDFLO() error = %v", err)
+	}
+	if !validation.Valid || len(validation.Missing) != 0 {
+		t.Fatalf("validation=%+v, want valid", validation)
+	}
+	if validation.Entity != "pres:device@example.test" || validation.TupleID != "loc-1" || validation.Method != "Derived" {
+		t.Fatalf("envelope=%+v", validation)
+	}
+	if !validation.Timestamp.Equal(time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("Timestamp=%v", validation.Timestamp)
+	}
+	if validation.Address.Latitude != "47.6205" || validation.Address.Longitude != "-122.3493" ||
+		validation.Address.Country != "US" || validation.Address.HouseNumber != "100" {
+		t.Fatalf("Address=%+v", validation.Address)
+	}
+	if validation.UsageRules.RetransmissionAllowed == nil || !*validation.UsageRules.RetransmissionAllowed ||
+		!validation.UsageRules.RetentionExpiry.Equal(time.Date(2026, 7, 7, 9, 30, 0, 0, time.UTC)) ||
+		validation.UsageRules.RulesetReference != "https://example.test/location-policy/e911" ||
+		validation.UsageRules.NoteWell != "Emergency location" {
+		t.Fatalf("UsageRules=%+v", validation.UsageRules)
+	}
+}
+
+func TestValidateEmergencyPIDFLORejectsLooseLegacyLocationXML(t *testing.T) {
+	body := []byte(`<?xml version="1.0"?>
+<presence entity="pres:device@example.test">
+  <tuple id="loc-1">
+    <status>
+      <gml:Point xmlns:gml="http://www.opengis.net/gml">
+        <gml:pos>47.6205 -122.3493</gml:pos>
+      </gml:Point>
+    </status>
+  </tuple>
+</presence>`)
+	address, err := ParseEmergencyPIDFLO(body)
+	if err != nil {
+		t.Fatalf("ParseEmergencyPIDFLO() legacy compatibility error = %v", err)
+	}
+	if address.Latitude != "47.6205" || address.Longitude != "-122.3493" {
+		t.Fatalf("legacy parsed address=%+v", address)
+	}
+
+	validation, err := ValidateEmergencyPIDFLO(body)
+	if err == nil {
+		t.Fatal("ValidateEmergencyPIDFLO() error = nil")
+	}
+	if validation.Valid {
+		t.Fatalf("validation should be invalid: %+v", validation)
+	}
+	for _, want := range []string{"geopriv", "location-info", "location", "method"} {
+		if !sameStringsContains(validation.Missing, want) {
+			t.Fatalf("missing=%+v, want %q", validation.Missing, want)
+		}
+	}
+}
+
+func TestValidateEmergencyPIDFLORejectsMalformedUsageRules(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "bad retransmission",
+			body: `<?xml version="1.0"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:gp="urn:ietf:params:xml:ns:pidf:geopriv10" xmlns:gml="http://www.opengis.net/gml" entity="pres:device@example.test">
+  <tuple id="loc-1"><status><gp:geopriv><gp:location-info><gml:Point><gml:pos>47.6205 -122.3493</gml:pos></gml:Point></gp:location-info><gp:usage-rules><gp:retransmission-allowed>sometimes</gp:retransmission-allowed></gp:usage-rules><gp:method>Manual</gp:method></gp:geopriv></status></tuple>
+</presence>`,
+			want: "retransmission-allowed",
+		},
+		{
+			name: "expired retention",
+			body: `<?xml version="1.0"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:gp="urn:ietf:params:xml:ns:pidf:geopriv10" xmlns:gml="http://www.opengis.net/gml" entity="pres:device@example.test">
+  <tuple id="loc-1"><status><gp:geopriv><gp:location-info><gml:Point><gml:pos>47.6205 -122.3493</gml:pos></gml:Point></gp:location-info><gp:usage-rules><gp:retention-expiry>2026-07-07T08:59:59Z</gp:retention-expiry></gp:usage-rules><gp:method>Manual</gp:method></gp:geopriv></status><timestamp>2026-07-07T09:00:00Z</timestamp></tuple>
+</presence>`,
+			want: "retention-expiry",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ValidateEmergencyPIDFLO([]byte(tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateEmergencyPIDFLO() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildEmergencyPIDFLORejectsExpiredRetentionExpiry(t *testing.T) {
 	_, err := BuildEmergencyPIDFLOWithUsageRules(EmergencyPIDFLOConfig{
 		Timestamp: time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC),
@@ -727,4 +842,13 @@ func TestEmergencyRequestURIFallsBackToSOS(t *testing.T) {
 	if got := NormalizeEmergencyServiceURN("URN:SERVICE:SOS.POLICE"); got != "urn:service:sos.police" {
 		t.Fatalf("normalized URN=%q", got)
 	}
+}
+
+func sameStringsContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

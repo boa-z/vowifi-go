@@ -21,13 +21,14 @@ type ISIMIdentityReadError struct {
 }
 
 type FallbackMetadata struct {
-	Field          string
-	PrimarySource  string
-	FallbackSource string
-	Used           bool
-	RecoveryClass  simtransport.RecoveryClass
-	Recoverable    bool
-	Reason         string
+	Field                  string
+	PrimarySource          string
+	FallbackSource         string
+	Used                   bool
+	RecoveryClass          simtransport.RecoveryClass
+	Recoverable            bool
+	RecoveryRecommendation simtransport.RecoveryRecommendation
+	Reason                 string
 }
 
 type classifiedReadError struct {
@@ -84,13 +85,14 @@ func IsISIMIdentityDataEmpty(err error) bool {
 func NewReadFallbackMetadata(field, primarySource, fallbackSource string, err error) FallbackMetadata {
 	class := simtransport.ClassifyError(err)
 	return FallbackMetadata{
-		Field:          normalizeMetadataToken(field),
-		PrimarySource:  normalizeMetadataToken(primarySource),
-		FallbackSource: normalizeMetadataToken(fallbackSource),
-		Used:           strings.TrimSpace(fallbackSource) != "",
-		RecoveryClass:  class,
-		Recoverable:    class.Recoverable(),
-		Reason:         errorReason(err),
+		Field:                  normalizeMetadataToken(field),
+		PrimarySource:          normalizeMetadataToken(primarySource),
+		FallbackSource:         normalizeMetadataToken(fallbackSource),
+		Used:                   strings.TrimSpace(fallbackSource) != "",
+		RecoveryClass:          class,
+		Recoverable:            class.Recoverable(),
+		RecoveryRecommendation: simtransport.RecommendRecovery(class, 0),
+		Reason:                 errorReason(err),
 	}
 }
 

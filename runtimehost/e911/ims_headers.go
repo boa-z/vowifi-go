@@ -71,6 +71,17 @@ type EmergencyPIDFLOUsageRules struct {
 	NoteWell              string
 }
 
+type EmergencyPIDFLOValidation struct {
+	Valid      bool
+	Missing    []string
+	Address    EmergencyAddress
+	Entity     string
+	TupleID    string
+	Method     string
+	Timestamp  time.Time
+	UsageRules EmergencyPIDFLOUsageRules
+}
+
 type EmergencyMultipartRelatedConfig struct {
 	Boundary        string
 	SDPContentID    string
@@ -578,6 +589,18 @@ func ParseEmergencyPIDFLO(body []byte) (EmergencyAddress, error) {
 	return address, nil
 }
 
+func ValidateEmergencyPIDFLO(body []byte) (EmergencyPIDFLOValidation, error) {
+	validation, err := parseEmergencyPIDFLOValidation(body)
+	if err != nil {
+		return validation, err
+	}
+	validation.Valid = len(validation.Missing) == 0
+	if !validation.Valid {
+		return validation, errors.New("invalid e911 pidf-lo: missing " + strings.Join(validation.Missing, ", "))
+	}
+	return validation, nil
+}
+
 // UsableEmergencySIPRequestInfo builds runtime SIP request metadata from this
 // snapshot when the cached entitlement data is still locally usable.
 func (s EntitlementSnapshot) UsableEmergencySIPRequestInfo(cfg EmergencySIPHeaderConfig) (EmergencySIPRequestInfo, bool) {
@@ -972,6 +995,12 @@ type pidfLOCivicField struct {
 }
 
 const pidfLOPositionKey = "\x00pidf-lo-position"
+const pidfLOMethodKey = "\x00pidf-lo-method"
+const pidfLOTimestampKey = "\x00pidf-lo-timestamp"
+const pidfLORetransmissionAllowedKey = "\x00pidf-lo-retransmission-allowed"
+const pidfLORetentionExpiryKey = "\x00pidf-lo-retention-expiry"
+const pidfLORulesetReferenceKey = "\x00pidf-lo-ruleset-reference"
+const pidfLONoteWellKey = "\x00pidf-lo-note-well"
 
 func encodePIDFLOStart(enc *xml.Encoder, local string, attrs ...xml.Attr) error {
 	return enc.EncodeToken(xml.StartElement{Name: xml.Name{Local: local}, Attr: attrs})
@@ -1097,6 +1126,197 @@ func inPIDFLOCivicAddress(stack []pidfLOElement) bool {
 
 func isPIDFLOGeodeticPositionElement(local string) bool {
 	return strings.EqualFold(local, "pos") || strings.EqualFold(local, "coordinates")
+}
+
+func parseEmergencyPIDFLOValidation(body []byte) (EmergencyPIDFLOValidation, error) {
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	var stack []pidfLOElement
+	var result entitlementResult
+	var validation EmergencyPIDFLOValidation
+	var seenRoot bool
+	var rootIsPresence bool
+	var seenTuple bool
+	var seenStatus bool
+	var seenGeopriv bool
+	var seenLocationInfo bool
+	var seenMethod bool
+	for {
+		token, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return validation, err
+		}
+		switch x := token.(type) {
+		case xml.StartElement:
+			local := x.Name.Local
+			if !seenRoot {
+				seenRoot = true
+				rootIsPresence = strings.EqualFold(local, "presence")
+				if rootIsPresence {
+					validation.Entity = pidfLOAttr(x, "entity")
+				}
+			}
+			key := pidfLOValidationElementKey(local, stack)
+			if strings.EqualFold(local, "tuple") && pidfLOStackTopIs(stack, "presence") {
+				seenTuple = true
+				validation.TupleID = pidfLOAttr(x, "id")
+			}
+			if strings.EqualFold(local, "status") && pidfLOStackContainsLocal(stack, "tuple") {
+				seenStatus = true
+			}
+			if strings.EqualFold(local, "geopriv") && pidfLOStackContainsLocal(stack, "status") {
+				seenGeopriv = true
+			}
+			if strings.EqualFold(local, "location-info") && pidfLOStackContainsLocal(stack, "geopriv") {
+				seenLocationInfo = true
+			}
+			if key == pidfLOMethodKey {
+				seenMethod = true
+			}
+			stack = append(stack, pidfLOElement{local: local, key: key})
+		case xml.CharData:
+			if len(stack) == 0 || stack[len(stack)-1].key == "" {
+				continue
+			}
+			stack[len(stack)-1].text = append(stack[len(stack)-1].text, x...)
+		case xml.EndElement:
+			if len(stack) == 0 {
+				continue
+			}
+			elem := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			text := strings.TrimSpace(string(elem.text))
+			if text == "" {
+				continue
+			}
+			if err := collectPIDFLOValidationText(elem.key, text, &validation, &result); err != nil {
+				return validation, err
+			}
+		}
+	}
+	validation.Address = emergencyAddressFromFields(result.EmergencyAddress)
+	validation.Missing = pidfLOValidationMissing(validation, rootIsPresence, seenTuple, seenStatus, seenGeopriv, seenLocationInfo, seenMethod)
+	if !validation.Timestamp.IsZero() && !validation.UsageRules.RetentionExpiry.IsZero() && !validation.UsageRules.RetentionExpiry.After(validation.Timestamp) {
+		return validation, errors.New("invalid e911 pidf-lo: retention-expiry must be after timestamp")
+	}
+	return validation, nil
+}
+
+func pidfLOValidationElementKey(local string, stack []pidfLOElement) string {
+	switch {
+	case inPIDFLOCivicAddress(stack):
+		return local
+	case isPIDFLOGeodeticPositionElement(local) && pidfLOStackContainsLocal(stack, "location-info"):
+		return pidfLOPositionKey
+	case strings.EqualFold(local, "method") && pidfLOStackContainsLocal(stack, "geopriv"):
+		return pidfLOMethodKey
+	case strings.EqualFold(local, "timestamp") && pidfLOStackContainsLocal(stack, "tuple"):
+		return pidfLOTimestampKey
+	case strings.EqualFold(local, "retransmission-allowed") && pidfLOStackContainsLocal(stack, "usage-rules"):
+		return pidfLORetransmissionAllowedKey
+	case strings.EqualFold(local, "retention-expiry") && pidfLOStackContainsLocal(stack, "usage-rules"):
+		return pidfLORetentionExpiryKey
+	case strings.EqualFold(local, "ruleset-reference") && pidfLOStackContainsLocal(stack, "usage-rules"):
+		return pidfLORulesetReferenceKey
+	case strings.EqualFold(local, "note-well") && pidfLOStackContainsLocal(stack, "usage-rules"):
+		return pidfLONoteWellKey
+	default:
+		return ""
+	}
+}
+
+func collectPIDFLOValidationText(key, text string, validation *EmergencyPIDFLOValidation, result *entitlementResult) error {
+	switch key {
+	case pidfLOPositionKey:
+		collectPIDFLOGeodeticPosition(text, result)
+	case pidfLOMethodKey:
+		validation.Method = text
+	case pidfLOTimestampKey:
+		timestamp, err := time.Parse(time.RFC3339Nano, text)
+		if err != nil {
+			return errors.New("invalid e911 pidf-lo: malformed timestamp")
+		}
+		validation.Timestamp = timestamp
+	case pidfLORetransmissionAllowedKey:
+		switch strings.ToLower(text) {
+		case "true":
+			value := true
+			validation.UsageRules.RetransmissionAllowed = &value
+		case "false":
+			value := false
+			validation.UsageRules.RetransmissionAllowed = &value
+		default:
+			return errors.New("invalid e911 pidf-lo: malformed retransmission-allowed")
+		}
+	case pidfLORetentionExpiryKey:
+		expiry, err := time.Parse(time.RFC3339Nano, text)
+		if err != nil {
+			return errors.New("invalid e911 pidf-lo: malformed retention-expiry")
+		}
+		validation.UsageRules.RetentionExpiry = expiry
+	case pidfLORulesetReferenceKey:
+		validation.UsageRules.RulesetReference = text
+	case pidfLONoteWellKey:
+		validation.UsageRules.NoteWell = text
+	default:
+		collectEmergencyAddressField(key, text, result)
+	}
+	return nil
+}
+
+func pidfLOValidationMissing(validation EmergencyPIDFLOValidation, rootIsPresence, seenTuple, seenStatus, seenGeopriv, seenLocationInfo, seenMethod bool) []string {
+	var missing []string
+	if !rootIsPresence {
+		missing = append(missing, "presence")
+	}
+	if strings.TrimSpace(validation.Entity) == "" {
+		missing = append(missing, "entity")
+	}
+	if !seenTuple {
+		missing = append(missing, "tuple")
+	} else if strings.TrimSpace(validation.TupleID) == "" {
+		missing = append(missing, "tuple id")
+	}
+	if !seenStatus {
+		missing = append(missing, "status")
+	}
+	if !seenGeopriv {
+		missing = append(missing, "geopriv")
+	}
+	if !seenLocationInfo {
+		missing = append(missing, "location-info")
+	}
+	if !emergencyAddressHasPIDFLOLocation(validation.Address) {
+		missing = append(missing, "location")
+	}
+	if !seenMethod || strings.TrimSpace(validation.Method) == "" {
+		missing = append(missing, "method")
+	}
+	return missing
+}
+
+func pidfLOAttr(start xml.StartElement, local string) string {
+	for _, attr := range start.Attr {
+		if strings.EqualFold(attr.Name.Local, local) {
+			return strings.TrimSpace(attr.Value)
+		}
+	}
+	return ""
+}
+
+func pidfLOStackTopIs(stack []pidfLOElement, local string) bool {
+	return len(stack) > 0 && strings.EqualFold(stack[len(stack)-1].local, local)
+}
+
+func pidfLOStackContainsLocal(stack []pidfLOElement, local string) bool {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if strings.EqualFold(stack[i].local, local) {
+			return true
+		}
+	}
+	return false
 }
 
 func collectPIDFLOGeodeticPosition(text string, out *entitlementResult) {

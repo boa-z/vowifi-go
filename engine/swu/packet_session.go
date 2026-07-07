@@ -79,10 +79,13 @@ type ChildSARekeyDecision struct {
 	Action        ChildSARekeyAction
 	EstablishedAt time.Time
 	DueAt         time.Time
+	ExpiresAt     time.Time
 	NextDue       time.Time
 	Age           time.Duration
+	TimeToExpire  time.Duration
 	Lifetime      time.Duration
 	LeadTime      time.Duration
+	Expired       bool
 	Reason        string
 }
 
@@ -90,6 +93,21 @@ type ChildSARekeySnapshot struct {
 	Enabled       bool
 	EstablishedAt time.Time
 	DueAt         time.Time
+	ExpiresAt     time.Time
+	Lifetime      time.Duration
+	LeadTime      time.Duration
+}
+
+type ChildSARekeyWindow struct {
+	Enabled       bool
+	Due           bool
+	Expired       bool
+	EstablishedAt time.Time
+	DueAt         time.Time
+	ExpiresAt     time.Time
+	Age           time.Duration
+	TimeToRekey   time.Duration
+	TimeToExpire  time.Duration
 	Lifetime      time.Duration
 	LeadTime      time.Duration
 }
@@ -125,9 +143,11 @@ func (s *ChildSARekeyState) Advance(now time.Time) ChildSARekeyDecision {
 			Reason: "rekey disabled",
 		}
 	}
-	dueAt := s.dueAt()
 	decision := s.decision(now, ChildSARekeyNoAction, "child sa rekey not due")
-	if !now.Before(dueAt) {
+	if decision.Expired {
+		decision.Action = ChildSARekeyDue
+		decision.Reason = "child sa lifetime expired"
+	} else if !now.Before(decision.DueAt) {
 		decision.Action = ChildSARekeyDue
 		decision.Reason = "child sa rekey due"
 	}
@@ -152,6 +172,7 @@ func (s *ChildSARekeyState) Snapshot() ChildSARekeySnapshot {
 		Enabled:       true,
 		EstablishedAt: s.establishedAt,
 		DueAt:         s.dueAt(),
+		ExpiresAt:     s.expiresAt(),
 		Lifetime:      s.policy.Lifetime,
 		LeadTime:      s.policy.LeadTime,
 	}
@@ -165,25 +186,76 @@ func (s *ChildSARekeyState) NextDue() (time.Time, bool) {
 }
 
 func (s *ChildSARekeyState) decision(now time.Time, action ChildSARekeyAction, reason string) ChildSARekeyDecision {
-	dueAt := s.dueAt()
-	age := time.Duration(0)
-	if !s.establishedAt.IsZero() && now.After(s.establishedAt) {
-		age = now.Sub(s.establishedAt)
-	}
+	window := s.window(now)
 	return ChildSARekeyDecision{
 		Action:        action,
 		EstablishedAt: s.establishedAt,
-		DueAt:         dueAt,
-		NextDue:       dueAt,
-		Age:           age,
+		DueAt:         window.DueAt,
+		ExpiresAt:     window.ExpiresAt,
+		NextDue:       window.DueAt,
+		Age:           window.Age,
+		TimeToExpire:  window.TimeToExpire,
 		Lifetime:      s.policy.Lifetime,
 		LeadTime:      s.policy.LeadTime,
+		Expired:       window.Expired,
 		Reason:        reason,
 	}
 }
 
 func (s *ChildSARekeyState) dueAt() time.Time {
 	return s.establishedAt.Add(s.policy.Lifetime - s.policy.LeadTime)
+}
+
+func (s *ChildSARekeyState) expiresAt() time.Time {
+	return s.establishedAt.Add(s.policy.Lifetime)
+}
+
+func (s *ChildSARekeyState) window(now time.Time) ChildSARekeyWindow {
+	window, _ := ChildSARekeyWindowFor(s.policy, s.establishedAt, now)
+	return window
+}
+
+func ChildSARekeyWindowFor(policy ChildSARekeyPolicy, establishedAt, now time.Time) (ChildSARekeyWindow, error) {
+	normalized, enabled, err := normalizeChildSARekeyPolicy(policy)
+	if err != nil {
+		return ChildSARekeyWindow{}, err
+	}
+	if !enabled {
+		return ChildSARekeyWindow{}, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if establishedAt.IsZero() {
+		establishedAt = now
+	}
+	expiresAt := establishedAt.Add(normalized.Lifetime)
+	dueAt := expiresAt.Add(-normalized.LeadTime)
+	age := time.Duration(0)
+	if now.After(establishedAt) {
+		age = now.Sub(establishedAt)
+	}
+	timeToRekey := time.Duration(0)
+	if now.Before(dueAt) {
+		timeToRekey = dueAt.Sub(now)
+	}
+	timeToExpire := time.Duration(0)
+	if now.Before(expiresAt) {
+		timeToExpire = expiresAt.Sub(now)
+	}
+	return ChildSARekeyWindow{
+		Enabled:       true,
+		Due:           !now.Before(dueAt),
+		Expired:       !now.Before(expiresAt),
+		EstablishedAt: establishedAt,
+		DueAt:         dueAt,
+		ExpiresAt:     expiresAt,
+		Age:           age,
+		TimeToRekey:   timeToRekey,
+		TimeToExpire:  timeToExpire,
+		Lifetime:      normalized.Lifetime,
+		LeadTime:      normalized.LeadTime,
+	}, nil
 }
 
 func normalizeChildSARekeyPolicy(policy ChildSARekeyPolicy) (ChildSARekeyPolicy, bool, error) {

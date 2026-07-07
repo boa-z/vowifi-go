@@ -386,6 +386,14 @@ func TestPrepareStartFallsBackToDeviceIDAfterAccessIMEIFailure(t *testing.T) {
 		meta.RecoveryClass != simtransport.RecoveryClassControlPortHung {
 		t.Fatalf("IMEI fallback metadata=%+v", meta)
 	}
+	rec := meta.RecoveryRecommendation
+	if rec.Action != simtransport.RecoveryActionATControlRecovery ||
+		!rec.HardwareAffecting ||
+		len(rec.ATControlPlan) != 2 ||
+		rec.ATControlPlan[0].Command != "AT+CFUN=0" ||
+		rec.ATControlPlan[1].Command != "AT+CFUN=1" {
+		t.Fatalf("IMEI recovery recommendation=%+v", rec)
+	}
 }
 
 func TestPrepareStartClassifiesISIMReadFallback(t *testing.T) {

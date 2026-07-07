@@ -147,6 +147,58 @@ func TestRTPStreamStatsSequenceRollover(t *testing.T) {
 	if stats.LastSequenceNumber != 0x00010001 {
 		t.Fatalf("LastSequenceNumber=%d, want %d", stats.LastSequenceNumber, uint32(0x00010001))
 	}
+	if stats.SequenceRollovers != 1 {
+		t.Fatalf("SequenceRollovers=%d, want 1", stats.SequenceRollovers)
+	}
+}
+
+func TestRTPStreamStatsTimestampRollover(t *testing.T) {
+	var tracker RTPStreamStatsTracker
+	base := time.Unix(0, 0)
+	ssrc := uint32(0x44556678)
+	inputs := []struct {
+		sequence  uint16
+		timestamp uint32
+		arrival   time.Duration
+	}{
+		{sequence: 10, timestamp: 0xfffffff0},
+		{sequence: 11, timestamp: 0x00000090, arrival: 20 * time.Millisecond},
+		{sequence: 12, timestamp: 0x00000130, arrival: 40 * time.Millisecond},
+	}
+	for _, input := range inputs {
+		packet := buildRTPStatsPacket(ssrc, input.sequence, input.timestamp)
+		if _, err := tracker.ObserveRTPPacket(packet, base.Add(input.arrival), 8000); err != nil {
+			t.Fatalf("ObserveRTPPacket(%d) error = %v", input.sequence, err)
+		}
+	}
+
+	stats, ok := tracker.StatsForSSRC(ssrc)
+	if !ok {
+		t.Fatalf("StatsForSSRC() ok=false")
+	}
+	if stats.Packets != 3 || stats.ExpectedPackets != 3 || stats.LostPackets != 0 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	if stats.LastTimestamp != 0x0000000100000130 || stats.TimestampRollovers != 1 {
+		t.Fatalf("timestamp stats=%+v", stats)
+	}
+	if stats.Jitter != 0 {
+		t.Fatalf("Jitter=%d, want 0", stats.Jitter)
+	}
+}
+
+func TestRTPRelayDirectionQualityAggregatesRTPRollovers(t *testing.T) {
+	quality := newRTPRelayDirectionQuality(RTCPFeedbackClientToIMS, 0, 0, 0, 0, 0, 0, []RTPStreamStats{
+		{Packets: 3, ExpectedPackets: 3, SequenceRollovers: 1, TimestampRollovers: 2},
+		{Packets: 2, ExpectedPackets: 2, SequenceRollovers: 3, TimestampRollovers: 4},
+	}, nil)
+
+	if quality.RTPReceivedPackets != 5 || quality.RTPExpectedPackets != 5 {
+		t.Fatalf("quality packets=%+v", quality)
+	}
+	if quality.RTPSequenceRollovers != 4 || quality.RTPTimestampRollovers != 6 {
+		t.Fatalf("quality rollover stats=%+v", quality)
+	}
 }
 
 func TestRTPStreamStatsTracksSenderReportDelay(t *testing.T) {

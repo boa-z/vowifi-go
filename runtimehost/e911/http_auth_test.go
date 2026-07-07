@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boa-z/vowifi-go/runtimehost/carrier"
 )
@@ -118,6 +119,74 @@ func TestHTTPAuthenticateChallengeParserClassifiesProxyHeader(t *testing.T) {
 	challenge := challenges[0]
 	if challenge.Header != "Proxy-Authenticate" || challenge.Params["realm"] != "proxy" || challenge.Params["nonce"] != "proxy,nonce" {
 		t.Fatalf("proxy challenge=%+v", challenge)
+	}
+}
+
+func TestClassifyEntitlementHTTPStatusParsesRetryAfterDelta(t *testing.T) {
+	status := ClassifyEntitlementHTTPStatus(&HTTPResponse{
+		StatusCode: http.StatusTooManyRequests,
+		Headers:    []HeaderPair{{Key: "retry-after", Value: "17"}},
+	}, time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC))
+
+	if status.Class != EntitlementHTTPStatusRateLimited || !status.Retryable || status.Success {
+		t.Fatalf("status=%+v", status)
+	}
+	if status.RetryAfter != 17*time.Second || !status.RetryAfterAt.IsZero() || status.RetryAfterRaw != "17" {
+		t.Fatalf("retry after=%+v", status)
+	}
+}
+
+func TestClassifyEntitlementHTTPStatusParsesRetryAfterHTTPDate(t *testing.T) {
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	retryAt := now.Add(2 * time.Minute).Format(http.TimeFormat)
+	status := ClassifyEntitlementHTTPStatus(&HTTPResponse{
+		StatusCode: http.StatusServiceUnavailable,
+		Headers:    []HeaderPair{{Key: "Retry-After", Value: retryAt}},
+	}, now)
+
+	if status.Class != EntitlementHTTPStatusUnavailable || !status.Retryable {
+		t.Fatalf("status=%+v", status)
+	}
+	if status.RetryAfter != 2*time.Minute || !status.RetryAfterAt.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("retry after=%+v", status)
+	}
+}
+
+func TestClassifyEntitlementHTTPStatusRetryAfterScopeAndMalformed(t *testing.T) {
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	authStatus := ClassifyEntitlementHTTPStatus(&HTTPResponse{
+		StatusCode: http.StatusUnauthorized,
+		Headers:    []HeaderPair{{Key: "Retry-After", Value: "3"}},
+	}, now)
+	if authStatus.Class != EntitlementHTTPStatusAuthenticationNeeded || authStatus.RetryAfter != 3*time.Second {
+		t.Fatalf("auth status=%+v", authStatus)
+	}
+
+	forbidden := ClassifyEntitlementHTTPStatus(&HTTPResponse{
+		StatusCode: http.StatusForbidden,
+		Headers:    []HeaderPair{{Key: "Retry-After", Value: "not-a-date"}},
+	}, now)
+	if forbidden.Class != EntitlementHTTPStatusForbidden || forbidden.Retryable || forbidden.RetryAfter != 0 || forbidden.RetryAfterRaw != "" {
+		t.Fatalf("forbidden=%+v", forbidden)
+	}
+
+	serverError := ClassifyEntitlementHTTPStatus(&HTTPResponse{
+		StatusCode: http.StatusInternalServerError,
+		Headers:    []HeaderPair{{Key: "Retry-After", Value: "9"}},
+	}, now)
+	if serverError.Class != EntitlementHTTPStatusRetryableFailure || !serverError.Retryable || serverError.RetryAfter != 0 {
+		t.Fatalf("server error=%+v", serverError)
+	}
+}
+
+func TestParseHTTPRetryAfterRejectsNegativeDeltaAndClampsPastDate(t *testing.T) {
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	if _, _, ok := ParseHTTPRetryAfter("-1", now); ok {
+		t.Fatal("negative retry delta parsed successfully")
+	}
+	delay, at, ok := ParseHTTPRetryAfter(now.Add(-time.Minute).Format(http.TimeFormat), now)
+	if !ok || delay != 0 || !at.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("past date delay=%s at=%s ok=%v", delay, at, ok)
 	}
 }
 

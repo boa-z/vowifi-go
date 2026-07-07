@@ -85,6 +85,18 @@ func TestParseTranscriptJSONRejectsSensitiveFixture(t *testing.T) {
 			wantKind: "msisdn",
 		},
 		{
+			name:     "msisdn sip uri user",
+			wire:     "P-Preferred-Identity: <sip:15550101234@ims.example.invalid;user=phone>",
+			secret:   "15550101234",
+			wantKind: "sip uri user identity",
+		},
+		{
+			name:     "prefixed imsi sip uri user",
+			wire:     "P-Associated-URI: <sip:imsi-001-01-0000000000@ims.example.invalid>",
+			secret:   "001-01-0000000000",
+			wantKind: "sip uri user identity",
+		},
+		{
 			name:     "auth",
 			wire:     `Authorization: Digest username="<redacted-sip-user-1>", nonce="auth-secret", response="auth-response"`,
 			secret:   "auth-secret",

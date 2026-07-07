@@ -2748,6 +2748,31 @@ func TestFormatDialogReasonHeader(t *testing.T) {
 	}
 }
 
+func TestParseDialogReasonHeader(t *testing.T) {
+	reason, err := ParseDialogReasonHeader(`SIP;cause=487;text="Request \"Terminated\"";foo=bar`)
+	if err != nil {
+		t.Fatalf("ParseDialogReasonHeader() error = %v", err)
+	}
+	if reason.Raw != `SIP;cause=487;text="Request \"Terminated\"";foo=bar` ||
+		reason.Protocol != "SIP" ||
+		reason.Cause != 487 ||
+		reason.Text != `Request "Terminated"` ||
+		reason.Parameters["cause"] != "487" ||
+		reason.Parameters["text"] != `Request "Terminated"` ||
+		reason.Parameters["foo"] != "bar" {
+		t.Fatalf("reason=%+v", reason)
+	}
+	if _, err := ParseDialogReasonHeader(`SIP;text="missing cause"`); !errors.Is(err, ErrInvalidSIPMessage) {
+		t.Fatalf("ParseDialogReasonHeader(missing cause) err=%v, want ErrInvalidSIPMessage", err)
+	}
+	if _, err := ParseDialogReasonHeader(`SIP;cause=zero`); !errors.Is(err, ErrInvalidSIPMessage) {
+		t.Fatalf("ParseDialogReasonHeader(bad cause) err=%v, want ErrInvalidSIPMessage", err)
+	}
+	if _, err := ParseDialogReasonHeader(`SIP;cause=487;text="unterminated`); !errors.Is(err, ErrInvalidSIPMessage) {
+		t.Fatalf("ParseDialogReasonHeader(bad text) err=%v, want ErrInvalidSIPMessage", err)
+	}
+}
+
 func TestBuildIMSDialogRequestsIncludeSessionRefresher(t *testing.T) {
 	cfg := DialogRequestConfig{
 		Profile:          IMSProfile{IMPU: "sip:user@example"},
@@ -2933,9 +2958,22 @@ func TestParseDialogFailureInfoCapturesDiagnosticHeaders(t *testing.T) {
 			t.Fatalf("reason[%d]=%q, want %q", i, info.Reasons[i], wantReasons[i])
 		}
 	}
+	if len(info.DialogReasons) != 2 {
+		t.Fatalf("dialog reasons=%+v", info.DialogReasons)
+	}
+	if info.DialogReasons[0].Protocol != "SIP" || info.DialogReasons[0].Cause != 486 || info.DialogReasons[0].Text != "Busy Here" {
+		t.Fatalf("SIP dialog reason=%+v", info.DialogReasons[0])
+	}
+	if info.DialogReasons[1].Protocol != "Q.850" || info.DialogReasons[1].Cause != 17 || info.DialogReasons[1].Text != "user busy" {
+		t.Fatalf("Q.850 dialog reason=%+v", info.DialogReasons[1])
+	}
 	resp.Headers["Warning"][0] = `399 changed "mutated"`
 	if info.Warnings[0] != wantWarnings[0] {
 		t.Fatalf("failure info kept header backing slice: warnings=%q", info.Warnings)
+	}
+	resp.Headers["reason"][0] = `SIP;cause=500;text="changed"`
+	if info.DialogReasons[0].Raw != wantReasons[0] {
+		t.Fatalf("failure info kept Reason backing slice: reasons=%+v", info.DialogReasons)
 	}
 }
 
@@ -2963,6 +3001,7 @@ func TestParseProvisionalResponseInfoReliableEarlyMedia(t *testing.T) {
 			"To":           {`<sip:+18005551212@ims.example;user=phone>;tag=remote-1`},
 			"Contact":      {`<sip:+18005551212@pcscf.example;transport=udp>`},
 			"Content-Type": {"application/sdp; charset=utf-8"},
+			"Reason":       {`SIP;cause=183;text="Session Progress"`},
 		},
 		Body: body,
 	}
@@ -2976,6 +3015,10 @@ func TestParseProvisionalResponseInfoReliableEarlyMedia(t *testing.T) {
 	if !info.EarlyMedia || string(info.SDP) != string(body) || info.RemoteTag != "remote-1" ||
 		info.RemoteTargetURI != "sip:+18005551212@pcscf.example;transport=udp" {
 		t.Fatalf("media/dialog info=%+v", info)
+	}
+	if len(info.DialogReasons) != 1 || info.DialogReasons[0].Protocol != "SIP" ||
+		info.DialogReasons[0].Cause != 183 || info.DialogReasons[0].Text != "Session Progress" {
+		t.Fatalf("dialog reasons=%+v", info.DialogReasons)
 	}
 	body[0] = 'x'
 	if string(info.SDP) == string(body) {

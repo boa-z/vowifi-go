@@ -15,12 +15,12 @@ the official closed-source VoWiFi implementation.
 
 | Area | Packages | Responsibility |
 | --- | --- | --- |
-| SIM and AKA | `engine/sim`, `runtimehost/simauth` | SIM/ISIM APDU helpers, identity reading, and AKA challenge material. |
-| SWu and ePDG | `engine/swu` | IKEv2, EAP-AKA/AKA', MOBIKE, ESP, TUN, routing, and XFRM boundaries for the SWu dataplane. |
-| Runtime host | `runtimehost` | Lifecycle state, modem access boundaries, service wrappers, IMS registration wiring, and dataplane startup. |
-| Carrier and E911 | `runtimehost/carrier`, `runtimehost/e911` | Carrier policy presets, overrides, entitlement bootstrap, and E911 request contracts. |
+| SIM and AKA | `engine/sim`, `runtimehost/simauth` | SIM/ISIM APDU helpers, AT and QMI UIM transport adapters, identity reading, AKA challenge material, and typed SIM auth failures. |
+| SWu and ePDG | `engine/swu` | IKEv2, EAP-AKA/AKA', MOBIKE, ESP, CHILD_SA rekey scheduling, TUN, routing, and XFRM boundaries for the SWu dataplane. |
+| Runtime host | `runtimehost` | Lifecycle state, modem access boundaries, service wrappers, IMS registration wiring, refresh/recovery metadata, and dataplane startup. |
+| Carrier and E911 | `runtimehost/carrier`, `runtimehost/e911` | Carrier policy presets, overrides, entitlement bootstrap, E911 request contracts, PIDF-LO validation, and emergency multipart body helpers. |
 | Messaging | `runtimehost/messaging`, `runtimehost/eventhost` | SMS, USSD, inbound event dispatch, SIP MESSAGE hooks, and delivery report handling. |
-| Voice | `runtimehost/voiceclient`, `runtimehost/voicehost` | IMS SIP transport, dialog helpers, SDP rewriting, RTP/RTCP relay, SRTP/SRTCP helpers, and local SIP interworking. |
+| Voice | `runtimehost/voiceclient`, `runtimehost/voicehost` | IMS SIP transport, dialog helpers, SDP rewriting, RTP/RTCP relay and quality stats, SRTP/SRTCP helpers, and local SIP interworking. |
 
 ## High-Level Flow
 

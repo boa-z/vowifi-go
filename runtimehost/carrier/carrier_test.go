@@ -59,6 +59,30 @@ func TestNormalizeSubscriberProfileDerivesRealmsAndNAI(t *testing.T) {
 	}
 }
 
+func TestIMSAccessProfileForSubscriberDefaultsRealVoWiFiMetadata(t *testing.T) {
+	ClearCarrierOverrides()
+	t.Cleanup(ClearCarrierOverrides)
+
+	profile := IMSAccessProfileForSubscriber(IMSAccessProfileInput{IMSI: "001010123456789"})
+	if profile.MCC != "001" || profile.MNC != "010" || profile.PresetID != "001010" {
+		t.Fatalf("profile PLMN=(%q,%q) PresetID=%q, want 001010", profile.MCC, profile.MNC, profile.PresetID)
+	}
+	if profile.IMSAPN != "ims" || profile.EmergencyAPN != "sos" {
+		t.Fatalf("APNs ims=%q emergency=%q, want ims/sos", profile.IMSAPN, profile.EmergencyAPN)
+	}
+	if !reflect.DeepEqual(profile.PCSCFFQDNs, []string{"pcscf.ims.mnc010.mcc001.3gppnetwork.org"}) {
+		t.Fatalf("PCSCFFQDNs=%+v, want derived P-CSCF", profile.PCSCFFQDNs)
+	}
+	if !reflect.DeepEqual(profile.EmergencyServiceURNs, []string{"urn:service:sos"}) {
+		t.Fatalf("EmergencyServiceURNs=%+v, want sos default", profile.EmergencyServiceURNs)
+	}
+	if profile.IMSPrivateIdentity != "001010123456789@ims.mnc010.mcc001.3gppnetwork.org" ||
+		profile.IMSPublicIdentity != "sip:001010123456789@ims.mnc010.mcc001.3gppnetwork.org" ||
+		profile.PermanentNAI != "0001010123456789@nai.epc.mnc010.mcc001.3gppnetwork.org" {
+		t.Fatalf("identities=%+v", profile)
+	}
+}
+
 func TestResolveEffectiveCarrierConfigDerivesPLMNFromIMSI(t *testing.T) {
 	ClearCarrierOverrides()
 	cfg := ResolveEffectiveCarrierConfig(EffectiveCarrierConfigInput{IMSI: "310280233621715"})
@@ -254,6 +278,47 @@ func TestLoadCarrierOverridesAcceptsTopLevelNetworkAliases(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.Network.PCSCFFQDNs, []string{"pcscf-a.top.example", "pcscf-b.top.example"}) {
 		t.Fatalf("PCSCFFQDNs=%+v, want split top-level pcscf_list", cfg.Network.PCSCFFQDNs)
+	}
+}
+
+func TestLoadCarrierOverridesNormalizesAccessProfileMetadata(t *testing.T) {
+	ClearCarrierOverrides()
+	t.Cleanup(ClearCarrierOverrides)
+
+	path := filepath.Join(t.TempDir(), "carriers.json")
+	if err := os.WriteFile(path, []byte(`{
+		"001012": {
+			"mcc": "001",
+			"mnc": "012",
+			"network": {
+				"apn": " IMS-CUSTOM ",
+				"sos_apn": " SOS-CUSTOM ",
+				"pcscf_fqdns": ["PCSCF-A.PROFILE.EXAMPLE.", "pcscf-b.profile.example"],
+				"service_urns": ["fire", "URN:SERVICE:SOS.POLICE", "911", "fire"],
+				"pani": " IEEE-802.11;i-wlan-node-id=\"node;2\" ",
+				"visited_network": " visited.profile.example "
+			}
+		}
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCarrierOverrides(path); err != nil {
+		t.Fatalf("LoadCarrierOverrides() error = %v", err)
+	}
+	profile := IMSAccessProfileForSubscriber(IMSAccessProfileInput{IMSI: "001012123456789"})
+	if profile.IMSAPN != "ims-custom" || profile.EmergencyAPN != "sos-custom" {
+		t.Fatalf("APNs ims=%q emergency=%q, want custom normalized APNs", profile.IMSAPN, profile.EmergencyAPN)
+	}
+	if !reflect.DeepEqual(profile.PCSCFFQDNs, []string{"pcscf-a.profile.example", "pcscf-b.profile.example"}) {
+		t.Fatalf("PCSCFFQDNs=%+v, want normalized candidates", profile.PCSCFFQDNs)
+	}
+	wantURNs := []string{"urn:service:sos.fire", "urn:service:sos.police", "urn:service:sos"}
+	if !reflect.DeepEqual(profile.EmergencyServiceURNs, wantURNs) {
+		t.Fatalf("EmergencyServiceURNs=%+v, want %+v", profile.EmergencyServiceURNs, wantURNs)
+	}
+	if profile.AccessNetworkInfo != `IEEE-802.11;i-wlan-node-id="node;2"` ||
+		profile.VisitedNetworkID != "visited.profile.example" {
+		t.Fatalf("ANI/visited=%q/%q, want normalized policy metadata", profile.AccessNetworkInfo, profile.VisitedNetworkID)
 	}
 }
 

@@ -617,6 +617,29 @@ func BuildReauthenticationResponse(identity string, request Packet, keys Keys, i
 	if err != nil {
 		return Packet{}, Keys{}, err
 	}
+	return buildReauthenticationResponse(identity, request, keys, iv, parsed)
+}
+
+func BuildReauthenticationResponseWithCounterCheck(identity string, request Packet, keys Keys, iv []byte, lastCounter uint16, lastCounterKnown bool) (Packet, Keys, bool, error) {
+	parsed, err := ParseReauthenticationRequest(request, keys)
+	if err != nil {
+		return Packet{}, Keys{}, false, err
+	}
+	if lastCounterKnown && parsed.Counter <= lastCounter {
+		response, err := buildReauthenticationCounterTooSmallResponse(request, keys, iv, parsed)
+		if err != nil {
+			return Packet{}, Keys{}, false, err
+		}
+		return response, keys, true, nil
+	}
+	response, nextKeys, err := buildReauthenticationResponse(identity, request, keys, iv, parsed)
+	if err != nil {
+		return Packet{}, Keys{}, false, err
+	}
+	return response, nextKeys, false, nil
+}
+
+func buildReauthenticationResponse(identity string, request Packet, keys Keys, iv []byte, parsed ReauthenticationRequest) (Packet, Keys, error) {
 	nextKeys, err := DeriveReauthenticationKeys(identity, keys, parsed.Counter, parsed.NonceS)
 	if err != nil {
 		return Packet{}, Keys{}, err
@@ -635,6 +658,10 @@ func BuildReauthenticationCounterTooSmallResponse(request Packet, keys Keys, iv 
 	if err != nil {
 		return Packet{}, err
 	}
+	return buildReauthenticationCounterTooSmallResponse(request, keys, iv, parsed)
+}
+
+func buildReauthenticationCounterTooSmallResponse(request Packet, keys Keys, iv []byte, parsed ReauthenticationRequest) (Packet, error) {
 	return buildReauthenticationResponsePacket(request, keys, iv, parsed, []Attribute{
 		CounterTooSmallAttribute(),
 		CounterAttribute(parsed.Counter),

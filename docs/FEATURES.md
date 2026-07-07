@@ -42,14 +42,16 @@ protocol layers needed by VoHive:
   explicit identity readers to APDU/CRSM/AT+CRSM identity reads, AT `CGSN`/`GSN`
   IMEI reads with modem-access recovery retry, SIM/ISIM recovery error
   classification with opt-in hooks and default non-destructive AT control
-  recovery plans,
+  recovery plans and operator-visible recovery recommendations,
   human-readable APDU/CRSM status-word descriptions for common SIM/USIM/ISIM
   success, warning, procedure, and checking-error responses,
   reusable ISIM identity, USIM EF_IMSI decoding/encoding, and EF_AD MNC-length
   decoders, ISIM EF identity string TLV encoding and linear-fixed record
   padding helpers, short-APDU UPDATE BINARY/UPDATE RECORD EF write helpers,
   whitespace-tolerant APDU response hex parsing shared by logical-channel
-  transmits, and USIM/ISIM AKA AUTHENTICATE primitives
+  transmits, QMI UIM logical-channel APDU transport with slot, timeout,
+  context-hook, and USIM/ISIM AID resolution options, and USIM/ISIM AKA
+  AUTHENTICATE primitives with typed synchronization and MAC-failure errors
 - carrier presets and JSON carrier overrides, including AT&T TS.43/E911
   configuration for native `310/280` and `310/410` profiles, plus normalized
   multi-candidate P-CSCF profile overrides for registrar failover
@@ -60,7 +62,9 @@ protocol layers needed by VoHive:
   emergency service-category URN mapping, IMS emergency SIP Request-URI,
   `P-Access-Network-Info`, `Geolocation`, and MMTel service header helpers,
   inline PIDF-LO `multipart/related` emergency INVITE body construction with
-  `cid:` Geolocation references,
+  `cid:` Geolocation references, SDP/PIDF-LO Content-ID assignment and
+  `start` parameter handling, strict PIDF-LO presence/tuple/geopriv envelope
+  and usage-rule validation,
   token/websheet handling, RAND/AUTN challenge response through the AKA
   provider, and EAP-AKA/AKA' relay packet response generation with
   Any/FullAuth/Permanent Identity selection, KDF negotiation, Notification ACK,
@@ -114,7 +118,8 @@ protocol layers needed by VoHive:
   prepared P-CSCF candidate fallback
 - IMS REGISTER refresh maintenance on the reusable SIP flow, including
   expiry-based renewal, 423 `Min-Expires` retry handling, retry scheduling,
-  binding/auth/CSeq state updates, full re-registration after recoverable
+  binding/auth/CSeq state updates, registration result metadata for
+  registered/expiry/refresh timing, full re-registration after recoverable
   refresh/flow failures, and shutdown de-registration with the latest
   registration state
 - IMS recovery re-registration on reusable SIP flows can advance to the next
@@ -200,6 +205,10 @@ protocol layers needed by VoHive:
 - IKEv2 CREATE_CHILD_SA initiator flow for additional or rekeyed ESP Child SAs,
   including SA/Nonce/TS request construction, REKEY_SA notify support,
   encrypted response validation, and per-exchange Ni/Nr key derivation
+- CHILD_SA rekey scheduling metadata for userspace packet sessions, including
+  configured lifetime/lead time, established/due/expiry timestamps, time-to-
+  rekey/time-to-expire windows, due/expired decisions, and snapshots exposed to
+  tunnel managers and packet pumps
 - encrypted IKE_AUTH EAP-Identity exchange scaffolding, including IDi, CP,
   CHILD_SA/TSi/TSr request payloads, responder EAP parsing, and
   EAP-Response/Identity transmission
@@ -269,7 +278,8 @@ protocol layers needed by VoHive:
   media legs, and SRTP plaintext-stage event callbacks plus generated SRTCP
   protection during media transforms
 - RTP stream quality helpers for per-SSRC packet/loss/duplicate/out-of-order,
-  extended-sequence, and interarrival-jitter tracking, plus RTCP Receiver
+  extended-sequence, RTP sequence-number rollover, timestamp rollover, and
+  interarrival-jitter tracking, plus RTCP Receiver
   Report block generation from observed RTP streams, Sender Report and SDES
   packet construction, relay-side clear-RTP reception snapshots, SRTP plaintext
   observer integration for encrypted relay streams, and generated Receiver/
@@ -391,7 +401,8 @@ protocol layers needed by VoHive:
   inbound/outbound SIP wire transcripts, preserving CRLF framing while checking
   sensitive data before materialization, plus lightweight SIP semantic parsing
   for request/status lines, compact headers, `CSeq`, and `Content-Length`
-  assertions
+  assertions, including SIP URI user identity validation in fixture redaction
+  checks
 
 ## Known Gaps
 

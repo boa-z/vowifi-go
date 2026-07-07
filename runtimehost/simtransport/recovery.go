@@ -10,6 +10,7 @@ import (
 )
 
 type RecoveryClass string
+type RecoveryAction string
 type APDURecoveryAction string
 
 const (
@@ -23,10 +24,29 @@ const (
 )
 
 const (
+	RecoveryActionNone              RecoveryAction = ""
+	RecoveryActionATControlRecovery RecoveryAction = "at_control_recovery"
+	RecoveryActionRetryLater        RecoveryAction = "retry_later"
+	RecoveryActionRefreshIdentity   RecoveryAction = "refresh_identity_source"
+	RecoveryActionRepairAPDU        RecoveryAction = "repair_apdu_exchange"
+	RecoveryActionInspectATError    RecoveryAction = "inspect_at_error"
+)
+
+const (
 	APDURecoveryNone        APDURecoveryAction = ""
 	APDURecoveryCorrectLe   APDURecoveryAction = "correct_le"
 	APDURecoveryGetResponse APDURecoveryAction = "get_response"
 )
+
+// RecoveryRecommendation describes a non-executing recovery decision.
+type RecoveryRecommendation struct {
+	Class             RecoveryClass
+	Action            RecoveryAction
+	Recoverable       bool
+	RetryAfter        time.Duration
+	ATControlPlan     []ATRecoveryStep
+	HardwareAffecting bool
+}
 
 type APDURecoveryPlan struct {
 	Action APDURecoveryAction
@@ -90,6 +110,37 @@ func (p APDURecoveryPlan) Recoverable() bool {
 
 func (p APDURecoveryPlan) LeByte() (byte, error) {
 	return apduLeByte(p.Le)
+}
+
+// RecommendRecovery maps a recovery class to operator-visible next steps.
+//
+// For AT control recovery, the returned plan is descriptive only; callers must
+// pass it to RunATRecoveryPlan or ExecuteATControlRecovery to perform commands.
+func RecommendRecovery(class RecoveryClass, attempt int) RecoveryRecommendation {
+	rec := RecoveryRecommendation{
+		Class:       class,
+		Recoverable: class.Recoverable(),
+	}
+	switch class {
+	case RecoveryClassControlPortHung:
+		rec.Action = RecoveryActionATControlRecovery
+		rec.ATControlPlan = PlanATControlRecovery(class, attempt)
+		rec.HardwareAffecting = len(rec.ATControlPlan) > 0
+	case RecoveryClassSIMBusy:
+		rec.Action = RecoveryActionRetryLater
+		rec.RetryAfter = 2 * time.Second
+	case RecoveryClassEmptyEF, RecoveryClassFileNotFound:
+		rec.Action = RecoveryActionRefreshIdentity
+	case RecoveryClassMalformedReply:
+		rec.Action = RecoveryActionRepairAPDU
+	case RecoveryClassATError:
+		rec.Action = RecoveryActionInspectATError
+		rec.ATControlPlan = PlanATControlRecovery(class, attempt)
+		rec.HardwareAffecting = len(rec.ATControlPlan) > 0
+	default:
+		rec.Action = RecoveryActionNone
+	}
+	return rec
 }
 
 // PlanATControlRecovery returns a non-executing recovery sequence for a stuck AT control path.

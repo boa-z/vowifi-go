@@ -236,6 +236,29 @@ func TestATControlRecoveryPlan(t *testing.T) {
 	}
 }
 
+func TestRecommendRecoveryForDecisionMetadata(t *testing.T) {
+	control := RecommendRecovery(RecoveryClassControlPortHung, 0)
+	if control.Class != RecoveryClassControlPortHung ||
+		control.Action != RecoveryActionATControlRecovery ||
+		!control.Recoverable ||
+		!control.HardwareAffecting ||
+		!reflect.DeepEqual(control.ATControlPlan, PlanATControlRecovery(RecoveryClassControlPortHung, 0)) {
+		t.Fatalf("control recommendation=%+v", control)
+	}
+
+	busy := RecommendRecovery(RecoveryClassSIMBusy, 0)
+	if busy.Action != RecoveryActionRetryLater || busy.RetryAfter != 2*time.Second ||
+		busy.HardwareAffecting || len(busy.ATControlPlan) != 0 {
+		t.Fatalf("SIM busy recommendation=%+v", busy)
+	}
+
+	empty := RecommendRecovery(RecoveryClassEmptyEF, 0)
+	if empty.Action != RecoveryActionRefreshIdentity || empty.HardwareAffecting ||
+		len(empty.ATControlPlan) != 0 {
+		t.Fatalf("empty EF recommendation=%+v", empty)
+	}
+}
+
 func TestRunATRecoveryPlanSkipsVendorSpecificByDefault(t *testing.T) {
 	plan := PlanATControlRecovery(RecoveryClassControlPortHung, 2)
 	executor := &recordingATRecoveryExecutor{}

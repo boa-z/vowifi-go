@@ -655,6 +655,10 @@ func TestBuildAndParseUSIMAuth(t *testing.T) {
 	if !errors.Is(err, swusim.ErrAuthFailure) {
 		t.Fatalf("auth failure err=%v, want ErrAuthFailure", err)
 	}
+	var macErr *swusim.MACFailureError
+	if !errors.As(err, &macErr) {
+		t.Fatalf("auth failure err=%T, want MACFailureError", err)
+	}
 }
 
 func TestAKAProviderExposesSyncFailureAUTS(t *testing.T) {
@@ -719,6 +723,10 @@ func TestParseUSIMAuthResponseNestedTLVAndPadding(t *testing.T) {
 	_, err = ParseUSIMAuthResponse([]byte{0xA0, 0x02, 0xDD, 0x00}, 0x90, 0x00)
 	if !errors.Is(err, swusim.ErrAuthFailure) {
 		t.Fatalf("wrapped MAC failure err=%v, want ErrAuthFailure", err)
+	}
+	var macErr *swusim.MACFailureError
+	if !errors.As(err, &macErr) {
+		t.Fatalf("wrapped MAC failure err=%T, want MACFailureError", err)
 	}
 
 	_, err = ParseUSIMAuthResponse(append([]byte{0xDC, 0x0E}, append(bytesFrom(0xA0, AKAAUTSLength), 0x01)...), 0x90, 0x00)

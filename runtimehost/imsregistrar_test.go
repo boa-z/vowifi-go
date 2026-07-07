@@ -114,6 +114,107 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 	}
 }
 
+func TestWireIMSRegistrarReportsRegistrationRefreshSchedule(t *testing.T) {
+	transport := &wireIMSRegistrarTransport{responses: []voiceclient.RegisterResponse{{
+		StatusCode: 200,
+		Reason:     "OK",
+		Headers: map[string][]string{
+			"P-Associated-URI": {"<sip:user@ims.example>"},
+			"Contact":          {"<sip:310280233641503@192.0.2.10:5060>;expires=1200"},
+		},
+	}}}
+	res, err := WireIMSRegistrar{
+		Transport:        transport,
+		ContactHost:      "192.0.2.10",
+		ContactPort:      5060,
+		Expires:          3600,
+		RefreshLead:      2 * time.Minute,
+		DisableKeepalive: true,
+	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
+		DeviceID: "dev-1",
+		TraceID:  "trace-refresh-schedule",
+		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterIMS() error = %v", err)
+	}
+	if !res.Registered || res.RegisteredAt.IsZero() {
+		t.Fatalf("result registration timestamps=%+v", res)
+	}
+	if res.Binding.Expires != 1200 {
+		t.Fatalf("binding expires=%d, want granted Contact expires 1200", res.Binding.Expires)
+	}
+	if got, want := res.ExpiresAt.Sub(res.RegisteredAt), 20*time.Minute; got != want {
+		t.Fatalf("ExpiresAt-RegisteredAt=%v, want %v", got, want)
+	}
+	if res.RefreshDelay != 18*time.Minute {
+		t.Fatalf("RefreshDelay=%v, want 18m", res.RefreshDelay)
+	}
+	if got, want := res.NextRefreshAt.Sub(res.RegisteredAt), res.RefreshDelay; got != want {
+		t.Fatalf("NextRefreshAt-RegisteredAt=%v, want %v", got, want)
+	}
+}
+
+func TestWireIMSRegistrarRefreshScheduleHonorsDisableRefresh(t *testing.T) {
+	transport := &wireIMSRegistrarTransport{responses: []voiceclient.RegisterResponse{{
+		StatusCode: 200,
+		Reason:     "OK",
+		Headers: map[string][]string{
+			"P-Associated-URI": {"<sip:user@ims.example>"},
+			"Contact":          {"<sip:310280233641503@192.0.2.10:5060>;expires=600"},
+		},
+	}}}
+	res, err := WireIMSRegistrar{
+		Transport:      transport,
+		ContactHost:    "192.0.2.10",
+		ContactPort:    5060,
+		DisableRefresh: true,
+	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
+		DeviceID: "dev-1",
+		TraceID:  "trace-no-refresh-schedule",
+		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterIMS() error = %v", err)
+	}
+	if res.RegisteredAt.IsZero() || res.ExpiresAt.Sub(res.RegisteredAt) != 10*time.Minute {
+		t.Fatalf("expiry metadata=%+v", res)
+	}
+	if res.RefreshDelay != 0 || !res.NextRefreshAt.IsZero() {
+		t.Fatalf("refresh schedule delay=%v next=%s, want disabled", res.RefreshDelay, res.NextRefreshAt)
+	}
+}
+
+func TestIMSRegistrationMaintenanceReportsUpdatedRefreshSchedule(t *testing.T) {
+	base := time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC)
+	m := &imsRegistrationMaintenance{
+		session: voiceclient.RegisterSession{Expires: 3600},
+		config:  WireIMSRegistrar{RefreshLead: time.Minute},
+		profile: voiceclient.IMSProfile{
+			Domain: "ims.example",
+		},
+		registered:   true,
+		statusCode:   200,
+		reason:       "OK",
+		registeredAt: base,
+		binding: voiceclient.RegistrationBinding{
+			ContactURI:     "sip:user@192.0.2.10:5060",
+			PublicIdentity: "sip:user@ims.example",
+			Expires:        900,
+		},
+	}
+	res := m.result("registered")
+	if got, want := res.ExpiresAt.Sub(res.RegisteredAt), 15*time.Minute; got != want {
+		t.Fatalf("ExpiresAt-RegisteredAt=%v, want %v", got, want)
+	}
+	if res.RefreshDelay != 14*time.Minute {
+		t.Fatalf("RefreshDelay=%v, want 14m", res.RefreshDelay)
+	}
+	if got, want := res.NextRefreshAt, base.Add(14*time.Minute); !got.Equal(want) {
+		t.Fatalf("NextRefreshAt=%s, want %s", got, want)
+	}
+}
+
 func TestWireIMSRegistrarHandlesAKADigestChallenge(t *testing.T) {
 	rawNonce := append(runtimeBytesFrom(0x10, 16), runtimeBytesFrom(0x40, 16)...)
 	transport := &wireIMSRegistrarTransport{responses: []voiceclient.RegisterResponse{
@@ -712,7 +813,7 @@ func TestIMSRegistrationRecoveryHonorsRetryAfterOnCurrentPCSCF(t *testing.T) {
 			}, WireIMSRegistrar{
 				DisableRefresh:   true,
 				DisableKeepalive: true,
-			}, IMSRegistrationConfig{}, voiceclient.IMSProfile{Domain: "ims.example"})
+			}, IMSRegistrationConfig{}, voiceclient.IMSProfile{Domain: "ims.example"}, time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC))
 			m.waitFunc = func(ctx context.Context, delay time.Duration) bool {
 				waits = append(waits, delay)
 				return tc.waitOK

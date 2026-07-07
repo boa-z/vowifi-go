@@ -21,6 +21,9 @@ type RTPStreamStats struct {
 	LostPackets        uint64
 	FractionLost       uint8
 	LastSequenceNumber uint32
+	SequenceRollovers  uint32
+	LastTimestamp      uint64
+	TimestampRollovers uint32
 	Jitter             uint32
 	LastSenderReport   uint32
 	Delay              uint32
@@ -145,7 +148,8 @@ type rtpStreamStatsState struct {
 	maxSeq        uint32
 	seenSequences map[uint32]struct{}
 	baseArrival   time.Time
-	baseTimestamp uint32
+	baseTimestamp uint64
+	lastTimestamp uint64
 	lastTransit   int64
 	jitter        float64
 	senderReport  rtpStreamSenderReportState
@@ -164,12 +168,14 @@ func newRTPStreamStatsState(header rtpPacketHeader, arrival time.Time) *rtpStrea
 			Packets:            1,
 			ExpectedPackets:    1,
 			LastSequenceNumber: seq,
+			LastTimestamp:      uint64(header.Timestamp),
 		},
 		baseSeq:       seq,
 		maxSeq:        seq,
 		seenSequences: map[uint32]struct{}{seq: {}},
 		baseArrival:   arrival,
-		baseTimestamp: header.Timestamp,
+		baseTimestamp: uint64(header.Timestamp),
+		lastTimestamp: uint64(header.Timestamp),
 	}
 	return state
 }
@@ -184,17 +190,20 @@ func (s *rtpStreamStatsState) observe(header rtpPacketHeader, arrival time.Time,
 	s.stats.Packets++
 
 	if seq > s.maxSeq {
+		timestamp := extendRTPTimestamp(s.lastTimestamp, header.Timestamp)
 		s.maxSeq = seq
-		s.updateJitter(header, arrival, clockRate)
+		s.lastTimestamp = timestamp
+		s.updateRolloverStats()
+		s.updateJitter(timestamp, arrival, clockRate)
 	} else {
 		s.stats.OutOfOrderPackets++
 	}
 	s.recalculateLoss()
 }
 
-func (s *rtpStreamStatsState) updateJitter(header rtpPacketHeader, arrival time.Time, clockRate int) {
+func (s *rtpStreamStatsState) updateJitter(timestamp uint64, arrival time.Time, clockRate int) {
 	arrivalOffset := rtpDurationUnits(arrival.Sub(s.baseArrival), clockRate)
-	timestampOffset := int64(int32(header.Timestamp - s.baseTimestamp))
+	timestampOffset := rtpExtendedTimestampOffset(timestamp, s.baseTimestamp)
 	transit := arrivalOffset - timestampOffset
 	delta := transit - s.lastTransit
 	if delta < 0 {
@@ -204,6 +213,12 @@ func (s *rtpStreamStatsState) updateJitter(header rtpPacketHeader, arrival time.
 	s.jitter += (float64(delta) - s.jitter) / 16
 	s.lastTransit = transit
 	s.stats.Jitter = uint32(s.jitter)
+}
+
+func (s *rtpStreamStatsState) updateRolloverStats() {
+	s.stats.SequenceRollovers = uint32(s.maxSeq >> 16)
+	s.stats.LastTimestamp = s.lastTimestamp
+	s.stats.TimestampRollovers = uint32(s.lastTimestamp >> 32)
 }
 
 func (s *rtpStreamStatsState) recalculateLoss() {
@@ -228,6 +243,9 @@ func (s *rtpStreamStatsState) recalculateLoss() {
 func (s *rtpStreamStatsState) snapshotAt(now time.Time) RTPStreamStats {
 	stats := s.stats
 	stats.LastSequenceNumber = s.maxSeq
+	stats.SequenceRollovers = uint32(s.maxSeq >> 16)
+	stats.LastTimestamp = s.lastTimestamp
+	stats.TimestampRollovers = uint32(s.lastTimestamp >> 32)
 	stats.LastSenderReport = s.senderReport.lastSenderReport
 	if !now.IsZero() && !s.senderReport.arrival.IsZero() {
 		stats.Delay = rtcpCompactDelay(now.Sub(s.senderReport.arrival))
@@ -284,6 +302,25 @@ func extendRTPSequence(maxSeq uint32, seq uint16) uint32 {
 		cycles -= 1 << 16
 	}
 	return cycles | uint32(seq)
+}
+
+func extendRTPTimestamp(reference uint64, timestamp uint32) uint64 {
+	cycles := reference & 0xffffffff00000000
+	refLow := uint32(reference)
+	switch {
+	case timestamp < refLow && refLow-timestamp > 0x80000000:
+		cycles += 1 << 32
+	case timestamp > refLow && timestamp-refLow > 0x80000000 && cycles >= 1<<32:
+		cycles -= 1 << 32
+	}
+	return cycles | uint64(timestamp)
+}
+
+func rtpExtendedTimestampOffset(timestamp, base uint64) int64 {
+	if timestamp >= base {
+		return int64(timestamp - base)
+	}
+	return -int64(base - timestamp)
 }
 
 func rtpDurationUnits(d time.Duration, clockRate int) int64 {

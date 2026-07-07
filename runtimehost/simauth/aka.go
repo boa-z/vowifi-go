@@ -349,7 +349,7 @@ func parseUSIMAuthPayload(tag int, data []byte) (AKAResult, error) {
 		if len(data) != 0 {
 			return AKAResult{}, fmt.Errorf("AKA MAC failure tag length must be 0 bytes: %d", len(data))
 		}
-		return AKAResult{}, swusim.ErrAuthFailure
+		return AKAResult{}, swusim.NewMACFailureError()
 	default:
 		return AKAResult{}, fmt.Errorf("unknown AKA response tag: 0x%02X", tag)
 	}

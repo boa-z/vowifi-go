@@ -66,6 +66,36 @@ func TestRedactorReusesPlaceholdersWithinTrace(t *testing.T) {
 	}
 }
 
+func TestRedactStringRemovesIMSIdentitiesFromSIPHeaderURIs(t *testing.T) {
+	in := strings.Join([]string{
+		"P-Preferred-Identity: <sip:15550101234@ims.example.invalid;user=phone>",
+		"P-Associated-URI: <sip:imsi-001-01-0000000000@ims.example.invalid>",
+		"Contact: <sip:imei490154203237518@ue.example.invalid:5060>",
+	}, "\r\n")
+
+	out := RedactString(in)
+	for _, sensitive := range []string{
+		"15550101234",
+		"001-01-0000000000",
+		"490154203237518",
+		"ims.example.invalid",
+		"ue.example.invalid",
+	} {
+		if strings.Contains(out, sensitive) {
+			t.Fatalf("redacted trace still contains %q:\n%s", sensitive, out)
+		}
+	}
+	for _, want := range []string{
+		"P-Preferred-Identity: <sip:<redacted-sip-user-1>@<redacted-domain-1>.invalid;user=phone>",
+		"P-Associated-URI: <sip:<redacted-sip-user-2>@<redacted-domain-1>.invalid>",
+		"Contact: <sip:<redacted-sip-user-3>@<redacted-domain-2>.invalid:5060>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("redacted trace missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRedactLinesUsesSharedMappingAndCopiesInput(t *testing.T) {
 	lines := [][]byte{
 		[]byte("sip:alice@example.test"),

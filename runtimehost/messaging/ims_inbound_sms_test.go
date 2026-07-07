@@ -158,6 +158,56 @@ func TestHandleIMSMessageAcceptsMultipartBase64TransferEncoded3GPPSMS(t *testing
 	}
 }
 
+func TestHandleIMSMessageHonorsMultipartRelatedStartContentID(t *testing.T) {
+	dispatch := &fakeDispatcher{}
+	svc := NewService("dev-1", "310280233641503", nil, dispatch)
+	tpdu := mustHex(t, "0005810180F600006270502143650005E8329BFD06")
+	rpdu := imsRPDataBody(0x3b, tpdu)
+	cpimBody, err := BuildIMSCPIMMessage("<sip:smsc@ims.example>", "<sip:user@ims.example>", "text/plain", []byte("carrier banner ignored"))
+	if err != nil {
+		t.Fatalf("BuildIMSCPIMMessage() error = %v", err)
+	}
+	boundary := "ims-message-related-start"
+	body := buildIMSMultipartTestBody(t, boundary, []imsMultipartTestPart{
+		{
+			headers: map[string][]string{
+				"Content-Type": {IMSCPIMContentType},
+				"Content-ID":   {"<banner@ims.example>"},
+			},
+			body: cpimBody,
+		},
+		{
+			headers: map[string][]string{
+				"Content-Type": {IMS3GPPSMSContentType},
+				"Content-ID":   {"<sms-rpdu@ims.example>"},
+			},
+			body: rpdu,
+		},
+	})
+
+	result, err := svc.HandleIMSMessage(context.Background(), IMSMessageRequest{
+		CallID:      "sms-downlink-multipart-start",
+		ContentType: `multipart/related; boundary="` + boundary + `"; start="<sms-rpdu@ims.example>"; type="application/vnd.3gpp.sms"`,
+		Body:        body,
+	})
+	if err != nil {
+		t.Fatalf("HandleIMSMessage() error = %v", err)
+	}
+	if result.StatusCode != 200 || result.ReplyContentType != IMS3GPPSMSContentType || string(result.ReplyBody) != string(BuildSMSRPAck(0x3b)) {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Incoming == nil || result.Incoming.Sender != "10086" || result.Incoming.Content != "hello" {
+		t.Fatalf("incoming=%+v", result.Incoming)
+	}
+	if len(dispatch.events) != 1 {
+		t.Fatalf("events=%d", len(dispatch.events))
+	}
+	got, ok := dispatch.events[0].(eventhost.SMSReceived)
+	if !ok || got.Content != "hello" {
+		t.Fatalf("event=%+v", dispatch.events[0])
+	}
+}
+
 func TestHandleIMSMessageAcceptsNestedMultipart3GPPSMS(t *testing.T) {
 	dispatch := &fakeDispatcher{}
 	svc := NewService("dev-1", "310280233641503", nil, dispatch)

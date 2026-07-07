@@ -112,6 +112,13 @@ func (s *Service) handleIMSMultipartMessage(ctx context.Context, msg IMSMessageR
 	if err != nil {
 		return IMSMessageResult{StatusCode: 400, Reason: err.Error()}, err
 	}
+	if part, ok := imsMessageMultipartStartPart(parts, imsMessageMultipartStartContentID(msg.ContentType)); ok {
+		nested := msg
+		nested.ContentType = part.ContentType
+		nested.Body = part.Body
+		nested.Headers = part.Headers
+		return s.HandleIMSMessage(ctx, nested)
+	}
 	for _, priority := range imsMultipartContentPriorities() {
 		for _, part := range parts {
 			if normalizedIMSMessageContentType(part.ContentType) != priority {
@@ -130,6 +137,7 @@ func (s *Service) handleIMSMultipartMessage(ctx context.Context, msg IMSMessageR
 
 type imsMessageMultipartPart struct {
 	ContentType string
+	ContentID   string
 	Headers     map[string][]string
 	Body        []byte
 }
@@ -157,6 +165,7 @@ func readIMSMessageMultipartParts(body []byte, boundary string) ([]imsMessageMul
 		}
 		parts = append(parts, imsMessageMultipartPart{
 			ContentType: contentType,
+			ContentID:   textproto.MIMEHeader(part.Header).Get("Content-ID"),
 			Headers:     headers,
 			Body:        partBody,
 		})
@@ -205,6 +214,47 @@ func imsMessageMultipartBoundary(contentType string) (string, error) {
 		return "", errors.New("IMS MESSAGE multipart boundary is empty")
 	}
 	return boundary, nil
+}
+
+func imsMessageMultipartStartContentID(contentType string) string {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	return normalizeIMSMessageMultipartContentID(params["start"])
+}
+
+func imsMessageMultipartStartPart(parts []imsMessageMultipartPart, startContentID string) (imsMessageMultipartPart, bool) {
+	startContentID = normalizeIMSMessageMultipartContentID(startContentID)
+	if startContentID == "" {
+		return imsMessageMultipartPart{}, false
+	}
+	for _, part := range parts {
+		if normalizeIMSMessageMultipartContentID(part.ContentID) != startContentID {
+			continue
+		}
+		if !imsMessageMultipartSupportedContentType(part.ContentType) {
+			return imsMessageMultipartPart{}, false
+		}
+		return part, true
+	}
+	return imsMessageMultipartPart{}, false
+}
+
+func normalizeIMSMessageMultipartContentID(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), `"`)
+	value = strings.Trim(strings.TrimSpace(value), "<>")
+	return strings.ToLower(value)
+}
+
+func imsMessageMultipartSupportedContentType(contentType string) bool {
+	contentType = normalizedIMSMessageContentType(contentType)
+	for _, priority := range imsMultipartContentPriorities() {
+		if contentType == priority {
+			return true
+		}
+	}
+	return false
 }
 
 func imsMultipartContentPriorities() []string {

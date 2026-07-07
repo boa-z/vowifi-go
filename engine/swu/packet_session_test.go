@@ -318,6 +318,62 @@ func TestPacketSessionRunChildSARekeyDueUpdatesNextDue(t *testing.T) {
 	}
 }
 
+func TestChildSARekeyWindowTracksSoftDueAndHardExpiry(t *testing.T) {
+	start := time.Date(2026, 7, 8, 9, 0, 0, 0, time.UTC)
+	policy := ChildSARekeyPolicy{
+		Lifetime: time.Hour,
+		LeadTime: 5 * time.Minute,
+	}
+	before, err := ChildSARekeyWindowFor(policy, start, start.Add(54*time.Minute+59*time.Second))
+	if err != nil {
+		t.Fatalf("ChildSARekeyWindowFor(before) error = %v", err)
+	}
+	if !before.Enabled || before.Due || before.Expired ||
+		!before.DueAt.Equal(start.Add(55*time.Minute)) ||
+		!before.ExpiresAt.Equal(start.Add(time.Hour)) ||
+		before.TimeToRekey != time.Second ||
+		before.TimeToExpire != 5*time.Minute+time.Second {
+		t.Fatalf("before window=%+v", before)
+	}
+	due, err := ChildSARekeyWindowFor(policy, start, start.Add(55*time.Minute))
+	if err != nil {
+		t.Fatalf("ChildSARekeyWindowFor(due) error = %v", err)
+	}
+	if !due.Due || due.Expired || due.TimeToRekey != 0 || due.TimeToExpire != 5*time.Minute {
+		t.Fatalf("due window=%+v", due)
+	}
+	expired, err := ChildSARekeyWindowFor(policy, start, start.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ChildSARekeyWindowFor(expired) error = %v", err)
+	}
+	if !expired.Due || !expired.Expired || expired.TimeToExpire != 0 {
+		t.Fatalf("expired window=%+v", expired)
+	}
+}
+
+func TestChildSARekeyStateReportsExpiredLifetime(t *testing.T) {
+	start := time.Date(2026, 7, 8, 9, 0, 0, 0, time.UTC)
+	state, err := NewChildSARekeyState(ChildSARekeyPolicy{
+		Lifetime: time.Hour,
+		LeadTime: 5 * time.Minute,
+	}, start)
+	if err != nil {
+		t.Fatalf("NewChildSARekeyState() error = %v", err)
+	}
+	decision := state.Advance(start.Add(time.Hour))
+	if decision.Action != ChildSARekeyDue ||
+		decision.Reason != "child sa lifetime expired" ||
+		!decision.Expired ||
+		!decision.ExpiresAt.Equal(start.Add(time.Hour)) ||
+		decision.TimeToExpire != 0 {
+		t.Fatalf("expired decision=%+v", decision)
+	}
+	snapshot := state.Snapshot()
+	if !snapshot.ExpiresAt.Equal(start.Add(time.Hour)) {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
 func TestPacketSessionRunChildSARekeyDueDisabledNoops(t *testing.T) {
 	start := time.Date(2026, 7, 8, 9, 0, 0, 0, time.UTC)
 	rekeyCalls := 0

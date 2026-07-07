@@ -110,10 +110,12 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 			Binding:    result.Binding,
 		}, err
 	}
+	registeredAt := time.Now()
+	expiresAt, refreshDelay, nextRefreshAt := imsRegistrationSchedule(r, result.Binding, registerSession, registeredAt, result.Registered)
 	voiceTransport := r.voiceTransport(cfg, profile, result.Binding, defaultFlow)
 	smsTransport := r.smsTransport(cfg, profile, result.Binding, voiceTransport)
 	ussdTransport := r.ussdTransport(cfg, profile, result.Binding, voiceTransport)
-	maintenance := newIMSRegistrationMaintenance(defaultFlow, registerSession, result, r, cfg, profile)
+	maintenance := newIMSRegistrationMaintenance(defaultFlow, registerSession, result, r, cfg, profile, registeredAt)
 	var closeRegistration func(context.Context) error
 	var recoverRegistration func(context.Context) (IMSRegistrationResult, error)
 	if maintenance != nil {
@@ -127,6 +129,10 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		Server:         firstRuntimeNonEmpty(result.Binding.PublicIdentity, profile.Domain),
 		Profile:        profile,
 		Binding:        result.Binding,
+		RegisteredAt:   registeredAt,
+		ExpiresAt:      expiresAt,
+		RefreshDelay:   refreshDelay,
+		NextRefreshAt:  nextRefreshAt,
 		VoiceTransport: voiceTransport,
 		SMSTransport:   smsTransport,
 		USSDTransport:  ussdTransport,
@@ -295,6 +301,7 @@ type imsRegistrationMaintenance struct {
 	statusCode     int
 	reason         string
 	binding        voiceclient.RegistrationBinding
+	registeredAt   time.Time
 	nextCSeq       int
 	authHeader     string
 	authHeaderName string
@@ -308,7 +315,7 @@ type imsRegistrationMaintenance struct {
 	closed         bool
 }
 
-func newIMSRegistrationMaintenance(flow *voiceclient.WireSIPFlow, session voiceclient.RegisterSession, result voiceclient.RegisterResult, config WireIMSRegistrar, runtimeConfig IMSRegistrationConfig, profile voiceclient.IMSProfile) *imsRegistrationMaintenance {
+func newIMSRegistrationMaintenance(flow *voiceclient.WireSIPFlow, session voiceclient.RegisterSession, result voiceclient.RegisterResult, config WireIMSRegistrar, runtimeConfig IMSRegistrationConfig, profile voiceclient.IMSProfile, registeredAt time.Time) *imsRegistrationMaintenance {
 	if flow == nil {
 		return nil
 	}
@@ -327,6 +334,7 @@ func newIMSRegistrationMaintenance(flow *voiceclient.WireSIPFlow, session voicec
 		statusCode:     result.StatusCode,
 		reason:         result.Reason,
 		binding:        result.Binding,
+		registeredAt:   registeredAt,
 		nextCSeq:       nextCSeq,
 		authHeader:     result.AuthHeader,
 		authHeaderName: result.AuthHeaderName,
@@ -377,12 +385,15 @@ func (m *imsRegistrationMaintenance) result(defaultReason string) IMSRegistratio
 	statusCode := m.statusCode
 	reason := m.reason
 	binding := m.binding
+	registeredAt := m.registeredAt
+	session := m.session
 	recoveryState := m.recoveryState
 	m.mu.Unlock()
 
 	if statusCode == 0 && registered {
 		statusCode = 200
 	}
+	expiresAt, refreshDelay, nextRefreshAt := imsRegistrationSchedule(m.config, binding, session, registeredAt, registered)
 	voiceTransport := m.config.voiceTransport(m.runtimeConfig, m.profile, binding, m.flow)
 	smsTransport := m.config.smsTransport(m.runtimeConfig, m.profile, binding, voiceTransport)
 	ussdTransport := m.config.ussdTransport(m.runtimeConfig, m.profile, binding, voiceTransport)
@@ -393,6 +404,10 @@ func (m *imsRegistrationMaintenance) result(defaultReason string) IMSRegistratio
 		Server:         firstRuntimeNonEmpty(binding.PublicIdentity, m.profile.Domain),
 		Profile:        m.profile,
 		Binding:        binding,
+		RegisteredAt:   registeredAt,
+		ExpiresAt:      expiresAt,
+		RefreshDelay:   refreshDelay,
+		NextRefreshAt:  nextRefreshAt,
 		RecoveryState:  recoveryState,
 		VoiceTransport: voiceTransport,
 		SMSTransport:   smsTransport,
@@ -524,6 +539,7 @@ func (m *imsRegistrationMaintenance) refresh(ctx context.Context) error {
 		m.statusCode = result.StatusCode
 		m.reason = result.Reason
 		m.binding = result.Binding
+		m.registeredAt = time.Now()
 		m.nextCSeq = result.NextCSeq
 		m.authHeader = result.AuthHeader
 		m.authHeaderName = result.AuthHeaderName
@@ -620,6 +636,7 @@ func (m *imsRegistrationMaintenance) recoverRegistration(ctx context.Context, ca
 	m.statusCode = result.StatusCode
 	m.reason = result.Reason
 	m.binding = result.Binding
+	m.registeredAt = time.Now()
 	m.nextCSeq = result.NextCSeq
 	m.authHeader = result.AuthHeader
 	m.authHeaderName = result.AuthHeaderName
@@ -754,20 +771,48 @@ func (m *imsRegistrationMaintenance) isRegistered() bool {
 }
 
 func (m *imsRegistrationMaintenance) refreshDelay() time.Duration {
-	if m.config.RefreshInterval > 0 {
-		return m.config.RefreshInterval
-	}
 	m.mu.Lock()
 	expires := m.binding.Expires
+	sessionExpires := m.session.Expires
 	m.mu.Unlock()
+	return imsRegistrationRefreshDelay(m.config, expires, sessionExpires)
+}
+
+func imsRegistrationSchedule(config WireIMSRegistrar, binding voiceclient.RegistrationBinding, session voiceclient.RegisterSession, registeredAt time.Time, registered bool) (time.Time, time.Duration, time.Time) {
+	if !registered || registeredAt.IsZero() {
+		return time.Time{}, 0, time.Time{}
+	}
+	expires := binding.Expires
 	if expires <= 0 {
-		expires = m.session.Expires
+		expires = session.Expires
+	}
+	if expires <= 0 {
+		expires = 3600
+	}
+	expiresAt := registeredAt.Add(time.Duration(expires) * time.Second)
+	if config.DisableRefresh {
+		return expiresAt, 0, time.Time{}
+	}
+	refreshDelay := imsRegistrationRefreshDelay(config, binding.Expires, session.Expires)
+	if refreshDelay <= 0 {
+		return expiresAt, 0, time.Time{}
+	}
+	return expiresAt, refreshDelay, registeredAt.Add(refreshDelay)
+}
+
+func imsRegistrationRefreshDelay(config WireIMSRegistrar, bindingExpires, sessionExpires int) time.Duration {
+	if config.RefreshInterval > 0 {
+		return config.RefreshInterval
+	}
+	expires := bindingExpires
+	if expires <= 0 {
+		expires = sessionExpires
 	}
 	if expires <= 0 {
 		expires = 3600
 	}
 	ttl := time.Duration(expires) * time.Second
-	lead := m.config.RefreshLead
+	lead := config.RefreshLead
 	if lead <= 0 {
 		lead = ttl / 10
 		if lead < 5*time.Second {

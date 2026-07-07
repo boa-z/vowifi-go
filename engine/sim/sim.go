@@ -99,6 +99,20 @@ func (e *SyncFailureError) AUTS() []byte {
 	return append([]byte(nil), e.auts...)
 }
 
+type MACFailureError struct{}
+
+func NewMACFailureError() *MACFailureError {
+	return &MACFailureError{}
+}
+
+func (e *MACFailureError) Error() string {
+	return ErrAuthFailure.Error()
+}
+
+func (e *MACFailureError) Unwrap() error {
+	return ErrAuthFailure
+}
+
 type AKAProvider interface {
 	CalculateAKA(rand16, autn16 []byte) (AKAResult, error)
 }

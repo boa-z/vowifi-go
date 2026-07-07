@@ -18,10 +18,12 @@ Useful focused targets are:
 
 - `make go-version`
 - `make module-path`
+- `make privacy-check`
 - `make fmt-check`
 - `make tidy-check`
 - `make vet`
 - `make smoke`
+- `make compat-vohive-selftest`
 - `make test`
 - `make race`
 - `make coverage`
@@ -30,9 +32,11 @@ Useful focused targets are:
 
 The default `make ci` path stays lightweight: it checks the Go version required
 by `go.mod`, verifies the canonical module path and Go import roots, downloads
-modules, verifies formatting and module tidiness, runs `go vet`, compiles
-packages/tests with a zero-test smoke pass, then runs the unit suite. Race and
-coverage runs are opt-in:
+modules, scans tracked content for personal emails, local home paths, and
+legacy module references, verifies formatting and module tidiness, runs
+`go vet`, compiles packages/tests with a zero-test smoke pass, runs the local
+VoHive compatibility self-test, then runs the unit suite. Race and coverage
+runs are opt-in:
 
 ```sh
 make race
@@ -47,9 +51,10 @@ GO=/usr/local/go/bin/go GOFMT=/usr/local/go/bin/gofmt make ci
 
 ## GitHub Actions
 
-GitHub Actions runs `.github/workflows/ci.yml` on Ubuntu with the Go version
-pinned by `go.mod`, calling `make ci` so local validation and the default CI
-job share the same entry point, including the canonical
+GitHub Actions runs `.github/workflows/ci.yml` on Ubuntu against both the
+minimum Go patch required by `go.mod` and the latest patch in that Go minor
+line, calling `make ci` so local validation and the default CI job share the
+same entry point, including the canonical
 `github.com/boa-z/vowifi-go` module-path guard. The workflow can also be
 started manually with optional race and coverage inputs, matching `make race`
 and `make coverage`.

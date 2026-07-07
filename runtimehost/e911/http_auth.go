@@ -4,8 +4,36 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
+
+// EntitlementHTTPStatusClass identifies the protocol meaning of an entitlement
+// HTTP response status without requiring callers to parse status codes directly.
+type EntitlementHTTPStatusClass string
+
+const (
+	EntitlementHTTPStatusSuccess              EntitlementHTTPStatusClass = "success"
+	EntitlementHTTPStatusAuthenticationNeeded EntitlementHTTPStatusClass = "authentication-needed"
+	EntitlementHTTPStatusForbidden            EntitlementHTTPStatusClass = "forbidden"
+	EntitlementHTTPStatusRateLimited          EntitlementHTTPStatusClass = "rate-limited"
+	EntitlementHTTPStatusUnavailable          EntitlementHTTPStatusClass = "unavailable"
+	EntitlementHTTPStatusRetryableFailure     EntitlementHTTPStatusClass = "retryable-failure"
+	EntitlementHTTPStatusFailure              EntitlementHTTPStatusClass = "failure"
+)
+
+// EntitlementHTTPStatus describes retry-relevant metadata for an entitlement
+// HTTP response.
+type EntitlementHTTPStatus struct {
+	StatusCode    int
+	Class         EntitlementHTTPStatusClass
+	Success       bool
+	Retryable     bool
+	RetryAfter    time.Duration
+	RetryAfterAt  time.Time
+	RetryAfterRaw string
+}
 
 // HTTPAuthenticationChallenge is a parsed WWW-Authenticate or Proxy-Authenticate value.
 type HTTPAuthenticationChallenge struct {
@@ -13,6 +41,47 @@ type HTTPAuthenticationChallenge struct {
 	Scheme string
 	Params map[string]string
 	Raw    string
+}
+
+// ClassifyEntitlementHTTPStatus returns a typed entitlement HTTP status view.
+// Retry-After is honored for 401, 403, 429, and 503 responses.
+func ClassifyEntitlementHTTPStatus(resp *HTTPResponse, now time.Time) EntitlementHTTPStatus {
+	status := EntitlementHTTPStatus{
+		Class: EntitlementHTTPStatusFailure,
+	}
+	if resp == nil {
+		return status
+	}
+	status.StatusCode = resp.StatusCode
+	status.Class = entitlementHTTPStatusClass(resp.StatusCode)
+	status.Success = resp.StatusCode >= 200 && resp.StatusCode < 300
+	status.Retryable = entitlementHTTPStatusRetryable(resp.StatusCode)
+	if entitlementHTTPStatusCanCarryRetryAfter(resp.StatusCode) {
+		status.RetryAfter, status.RetryAfterAt, status.RetryAfterRaw, _ = entitlementHTTPRetryAfter(resp.Headers, now)
+	}
+	return status
+}
+
+// ParseHTTPRetryAfter parses a Retry-After field value as either delta-seconds
+// or an HTTP-date. The returned duration is clamped at zero for dates in the past.
+func ParseHTTPRetryAfter(value string, now time.Time) (time.Duration, time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, time.Time{}, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second, time.Time{}, true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	now = entitlementHTTPRetryAfterNow(now)
+	wait := when.Sub(now)
+	if wait < 0 {
+		wait = 0
+	}
+	return wait, when, true
 }
 
 // HTTPAuthenticationChallengeError reports an E911 HTTP auth challenge that has
@@ -53,6 +122,64 @@ func httpAuthenticationChallengeError(resp *HTTPResponse) error {
 
 func httpStatusCanCarryAuthenticationChallenge(statusCode int) bool {
 	return statusCode == http.StatusUnauthorized || statusCode == http.StatusProxyAuthRequired
+}
+
+func entitlementHTTPStatusClass(statusCode int) EntitlementHTTPStatusClass {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
+		return EntitlementHTTPStatusAuthenticationNeeded
+	case http.StatusForbidden:
+		return EntitlementHTTPStatusForbidden
+	case http.StatusTooManyRequests:
+		return EntitlementHTTPStatusRateLimited
+	case http.StatusServiceUnavailable:
+		return EntitlementHTTPStatusUnavailable
+	}
+	switch {
+	case statusCode >= 200 && statusCode < 300:
+		return EntitlementHTTPStatusSuccess
+	case statusCode == http.StatusRequestTimeout || statusCode >= 500:
+		return EntitlementHTTPStatusRetryableFailure
+	default:
+		return EntitlementHTTPStatusFailure
+	}
+}
+
+func entitlementHTTPStatusRetryable(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return statusCode >= 500
+	}
+}
+
+func entitlementHTTPStatusCanCarryRetryAfter(statusCode int) bool {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func entitlementHTTPRetryAfter(headers []HeaderPair, now time.Time) (time.Duration, time.Time, string, bool) {
+	for _, header := range headers {
+		if !strings.EqualFold(strings.TrimSpace(header.Key), "Retry-After") {
+			continue
+		}
+		if delay, at, ok := ParseHTTPRetryAfter(header.Value, now); ok {
+			return delay, at, strings.TrimSpace(header.Value), true
+		}
+	}
+	return 0, time.Time{}, "", false
+}
+
+func entitlementHTTPRetryAfterNow(now time.Time) time.Time {
+	if now.IsZero() {
+		return time.Now().UTC()
+	}
+	return now.UTC()
 }
 
 func httpAuthenticationChallenges(statusCode int, headers []HeaderPair) []HTTPAuthenticationChallenge {

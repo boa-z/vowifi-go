@@ -159,23 +159,25 @@ type RTPRelayQualityStats struct {
 }
 
 type RTPRelayDirectionQuality struct {
-	Direction            RTCPFeedbackDirection
-	RTPPackets           uint64
-	RTPBytes             uint64
-	RTPDrops             uint64
-	RTCPPackets          uint64
-	RTCPBytes            uint64
-	RTCPDrops            uint64
-	RTPReceivedPackets   uint64
-	RTPExpectedPackets   uint64
-	RTPLostPackets       uint64
-	RTPDuplicatePackets  uint64
-	RTPOutOfOrderPackets uint64
-	RTPFractionLost      uint8
-	RTPMaxJitter         uint32
-	RTPStreams           []RTPStreamStats
-	RTCPReports          []RTPRelayRTCPReportQuality
-	RTCPMaxRoundTripTime time.Duration
+	Direction             RTCPFeedbackDirection
+	RTPPackets            uint64
+	RTPBytes              uint64
+	RTPDrops              uint64
+	RTCPPackets           uint64
+	RTCPBytes             uint64
+	RTCPDrops             uint64
+	RTPReceivedPackets    uint64
+	RTPExpectedPackets    uint64
+	RTPLostPackets        uint64
+	RTPDuplicatePackets   uint64
+	RTPOutOfOrderPackets  uint64
+	RTPSequenceRollovers  uint64
+	RTPTimestampRollovers uint64
+	RTPFractionLost       uint8
+	RTPMaxJitter          uint32
+	RTPStreams            []RTPStreamStats
+	RTCPReports           []RTPRelayRTCPReportQuality
+	RTCPMaxRoundTripTime  time.Duration
 }
 
 type RTPRelayRTCPReportQuality struct {
@@ -607,6 +609,8 @@ func newRTPRelayDirectionQuality(direction RTCPFeedbackDirection, rtpPackets, rt
 		quality.RTPLostPackets += stream.LostPackets
 		quality.RTPDuplicatePackets += stream.DuplicatePackets
 		quality.RTPOutOfOrderPackets += stream.OutOfOrderPackets
+		quality.RTPSequenceRollovers += uint64(stream.SequenceRollovers)
+		quality.RTPTimestampRollovers += uint64(stream.TimestampRollovers)
 		if stream.Jitter > quality.RTPMaxJitter {
 			quality.RTPMaxJitter = stream.Jitter
 		}
